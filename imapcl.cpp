@@ -1,10 +1,15 @@
 #include <iostream>
 #include <fstream>
+#include <sstream>
+#include <vector>
 #include <cstring>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <chrono>
+#include <thread>
+#include <sys/stat.h>
 
 void initialize_ssl() {
     SSL_load_error_strings();
@@ -31,7 +36,6 @@ int connect_to_server(const std::string& server_ip, int port, SSL_CTX* ctx, bool
     int sockfd;
     struct sockaddr_in serv_addr;
 
-    // Создаем сокет
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         std::cerr << "Socket creation error" << std::endl;
         return -1;
@@ -40,19 +44,16 @@ int connect_to_server(const std::string& server_ip, int port, SSL_CTX* ctx, bool
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
 
-    // Преобразуем IP-адрес сервера
     if (inet_pton(AF_INET, server_ip.c_str(), &serv_addr.sin_addr) <= 0) {
         std::cerr << "Invalid address/ Address not supported" << std::endl;
         return -1;
     }
 
-    // Подключаемся к серверу
     if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
         std::cerr << "Connection Failed" << std::endl;
         return -1;
     }
 
-    // Если включено шифрование, устанавливаем SSL-соединение
     if (use_tls) {
         SSL* ssl = SSL_new(ctx);
         SSL_set_fd(ssl, sockfd);
@@ -65,37 +66,122 @@ int connect_to_server(const std::string& server_ip, int port, SSL_CTX* ctx, bool
         }
 
         std::cout << "Connected with SSL encryption" << std::endl;
-        // Дальнейшие действия с SSL-соединением здесь
-
         SSL_free(ssl);
     } else {
         std::cout << "Connected without encryption" << std::endl;
-        // Дальнейшие действия с нешифрованным соединением здесь
     }
 
     return sockfd;
 }
 
-bool login(int sockfd, const std::string& username, const std::string& password) {
-    std::string login_cmd = "a001 LOGIN " + username + " " + password + "\r\n";
-    send(sockfd, login_cmd.c_str(), login_cmd.length(), 0);
+bool send_command(int sockfd, const std::string& command, std::string& response) {
+    send(sockfd, command.c_str(), command.length(), 0);
 
-    char buffer[1024] = {0};
+    char buffer[4096] = {0};
     int bytes_received = recv(sockfd, buffer, sizeof(buffer), 0);
     if (bytes_received > 0) {
-        std::string response(buffer);
+        response = std::string(buffer);
         std::cout << "Server response: " << response << std::endl;
+        return response.find("OK") != std::string::npos;
+    } else {
+        std::cerr << "No response from server" << std::endl;
+        return false;
+    }
+}
+
+bool receive_response(int sockfd, std::string& response) {
+    char buffer[4096] = {0};
+    response.clear();
+
+    int bytes_received = recv(sockfd, buffer, sizeof(buffer), 0);
+    if (bytes_received > 0) {
+        response = std::string(buffer);
+        std::cout << "Server response: " << response << std::endl;
+        return true;
+    } else {
+        std::cerr << "No response from server" << std::endl;
+        return false;
+    }
+}
+
+// Функция для кодирования в Base64
+std::string base64_encode(const std::string& input) {
+    BIO* bio, *b64;
+    BUF_MEM* buffer_ptr;
+
+    b64 = BIO_new(BIO_f_base64());
+    bio = BIO_new(BIO_s_mem());
+    bio = BIO_push(b64, bio);
+    BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
+
+    BIO_write(bio, input.data(), input.size());
+    BIO_flush(bio);
+    BIO_get_mem_ptr(bio, &buffer_ptr);
+
+    std::string output(buffer_ptr->data, buffer_ptr->length);
+    BIO_free_all(bio);
+
+    return output;
+}
+
+bool login(int sockfd, const std::string& username, const std::string& password) {
+    std::string response;
+
+    // Сначала обрабатываем приветственное сообщение сервера
+    if (!receive_response(sockfd, response)) {
+        return false;
+    }
+
+    // Формируем строку для AUTHENTICATE PLAIN
+    std::string auth_data = "\0" + username + "\0" + password;
+    std::string encoded_auth_data = base64_encode(auth_data);
+
+    // Отправляем команду AUTHENTICATE PLAIN
+    std::string auth_cmd = "a001 AUTHENTICATE PLAIN\r\n";
+    send(sockfd, auth_cmd.c_str(), auth_cmd.length(), 0);
+
+    // Ждём ответа сервера
+    if (!receive_response(sockfd, response) || response[0] != '+') {
+        std::cerr << "Server did not accept AUTHENTICATE PLAIN command" << std::endl;
+        return false;
+    }
+
+    // Отправляем Base64-закодированную строку
+    std::string auth_data_cmd = encoded_auth_data + "\r\n";
+    send(sockfd, auth_data_cmd.c_str(), auth_data_cmd.length(), 0);
+
+    // Читаем ответ сервера
+    while (receive_response(sockfd, response)) {
         if (response.find("OK") != std::string::npos) {
             std::cout << "Login successful" << std::endl;
             return true;
-        } else {
+        } else if (response.find("NO") != std::string::npos || response.find("BAD") != std::string::npos) {
             std::cerr << "Login failed" << std::endl;
             return false;
         }
-    } else {
-        std::cerr << "No response from server during login" << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    return false;
+}
+
+bool select_mailbox(int sockfd, const std::string& mailbox) {
+    std::string select_cmd = "a002 SELECT " + mailbox + "\r\n";
+    std::string response;
+    return send_command(sockfd, select_cmd, response);
+}
+
+bool fetch_messages(int sockfd, const std::string& fetch_command, const std::string& out_dir) {
+    std::string response;
+    if (!send_command(sockfd, fetch_command, response)) {
+        std::cerr << "Failed to fetch messages" << std::endl;
         return false;
     }
+
+    // Здесь необходимо добавить код для сохранения сообщений в файлы
+    // Используем out_dir для указания каталога для сохранения сообщений
+
+    return true;
 }
 
 bool read_credentials(const std::string& filepath, std::string& username, std::string& password) {
@@ -128,24 +214,106 @@ bool read_credentials(const std::string& filepath, std::string& username, std::s
     return true;
 }
 
+bool directory_exists(const std::string& path) {
+    struct stat info;
+    if (stat(path.c_str(), &info) != 0) {
+        return false; // Каталог не существует
+    } else if (info.st_mode & S_IFDIR) {
+        return true; // Это каталог
+    } else {
+        return false; // Это не каталог
+    }
+}
+
 int main(int argc, char* argv[]) {
-    // Параметры по умолчанию
-    std::string server_ip = "127.0.0.1";
+    std::string server_ip;
     int port = 143;
     bool use_tls = false;
-    std::string credentials_file = "credentials.txt"; // Имя файла с учётными данными
+    std::string cert_file;
+    std::string cert_dir = "/etc/ssl/certs";
+    std::string credentials_file;
+    std::string mailbox = "INBOX";
+    std::string out_dir;
+    bool only_headers = false;
+    bool only_new = false;
 
-    // Чтение учётных данных
     std::string username, password;
+
+    int opt;
+    while ((opt = getopt(argc, argv, "p:TC:c:a:b:o:nh")) != -1) {
+        switch (opt) {
+            case 'p':
+                port = std::stoi(optarg);
+                break;
+            case 'T':
+                use_tls = true;
+                port = 993; // Если включено шифрование, используем порт 993 по умолчанию
+                break;
+            case 'C':
+                cert_dir = optarg;
+                break;
+            case 'c':
+                cert_file = optarg;
+                break;
+            case 'a':
+                credentials_file = optarg;
+                break;
+            case 'b':
+                mailbox = optarg;
+                break;
+            case 'o':
+                out_dir = optarg;
+                break;
+            case 'n':
+                only_new = true;
+                break;
+            case 'h':
+                only_headers = true;
+                break;
+            default:
+                std::cerr << "Usage: " << argv[0] << " server [-p port] [-T [-c certfile] [-C certaddr]] [-n] [-h] -a auth_file [-b MAILBOX] -o out_dir\n";
+                return EXIT_FAILURE;
+        }
+    }
+
+    // Проверяем, передан ли IP сервера как обязательный аргумент
+    if (optind >= argc) {
+        std::cerr << "Error: server IP or domain name is required\n";
+        return EXIT_FAILURE;
+    }
+    server_ip = argv[optind];
+
+    initialize_ssl();
+    SSL_CTX* ctx = create_context();
+
+    if (credentials_file.empty()) {
+        std::cerr << "Error: credentials file is required (-a auth_file)\n";
+        return EXIT_FAILURE;
+    }
+
+    if (out_dir.empty()) {
+        std::cerr << "Error: output directory is required (-o out_dir)\n";
+        return EXIT_FAILURE;
+    }
+
     if (!read_credentials(credentials_file, username, password)) {
         return EXIT_FAILURE;
     }
 
-    // Инициализация OpenSSL
-    initialize_ssl();
-    SSL_CTX* ctx = create_context();
+    // Проверка на существование выходного каталога
+    if (!directory_exists(out_dir)) {
+        std::cerr << "Error: output directory does not exist: " << out_dir << "\n";
+        return EXIT_FAILURE;
+    }
 
-    // Подключение к серверу
+    if (use_tls && (!cert_file.empty() || !cert_dir.empty())) {
+        if (SSL_CTX_load_verify_locations(ctx, cert_file.empty() ? nullptr : cert_file.c_str(), cert_dir.c_str()) <= 0) {
+            std::cerr << "Error loading certificates\n";
+            cleanup_ssl(ctx);
+            return EXIT_FAILURE;
+        }
+    }
+
     int sockfd = connect_to_server(server_ip, port, ctx, use_tls);
     if (sockfd < 0) {
         std::cerr << "Failed to connect to server" << std::endl;
@@ -153,7 +321,6 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    // Авторизация на сервере
     if (!login(sockfd, username, password)) {
         std::cerr << "Authentication failed" << std::endl;
         close(sockfd);
@@ -161,7 +328,28 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    // Закрываем соединение
+    if (!select_mailbox(sockfd, mailbox)) {
+        std::cerr << "Failed to select mailbox" << std::endl;
+        close(sockfd);
+        cleanup_ssl(ctx);
+        return EXIT_FAILURE;
+    }
+
+    std::string fetch_command;
+    if (only_headers) {
+        fetch_command = "a003 FETCH 1:* (BODY.PEEK[HEADER])\r\n";
+    } else if (only_new) {
+        fetch_command = "a003 SEARCH UNSEEN\r\n";
+    } else {
+        fetch_command = "a003 FETCH 1:* (RFC822)\r\n";
+    }
+
+    if (!fetch_messages(sockfd, fetch_command, out_dir)) {
+        close(sockfd);
+        cleanup_ssl(ctx);
+        return EXIT_FAILURE;
+    }
+
     close(sockfd);
     cleanup_ssl(ctx);
     return 0;
