@@ -307,14 +307,53 @@ bool save_message(const std::string& message, const std::string& out_dir, int me
     std::string headers = message.substr(0, header_end);
     std::string body = message.substr(header_end + ((message[header_end] == '\r' && message[header_end + 1] == '\n') ? 4 : 2));
 
+    // Search for Content-Transfer-Encoding header in the original headers
+    std::string content_transfer_encoding;
+    std::istringstream header_stream_cte(headers);
+    std::string line;
+    while (std::getline(header_stream_cte, line)) {
+        // Remove CR if present
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.find("Content-Transfer-Encoding:") != std::string::npos) {
+            content_transfer_encoding = line.substr(line.find(":") + 1);
+            // Trim whitespace
+            content_transfer_encoding.erase(0, content_transfer_encoding.find_first_not_of(" \t"));
+            content_transfer_encoding.erase(content_transfer_encoding.find_last_not_of(" \t\r\n") + 1);
+            break;
+        }
+    }
+
+    // Convert to lower case for comparison
+    std::transform(content_transfer_encoding.begin(), content_transfer_encoding.end(), content_transfer_encoding.begin(), ::tolower);
+
+    // Now proceed to filter headers and decode any encoded words
+    // List of headers to keep
+    const std::vector<std::string> required_headers = {
+        "Date", "From", "To", "Subject", "Message-Id", "Message-ID"
+    };
+
     // Decode headers
     std::istringstream header_stream(headers);
     std::ostringstream decoded_headers;
-    std::string line;
     while (std::getline(header_stream, line)) {
         // Remove CR if present
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
+        }
+
+        // Check if the line is one of the required headers
+        bool is_required = false;
+        for (const auto& header : required_headers) {
+            if (line.find(header + ":") == 0) {
+                is_required = true;
+                break;
+            }
+        }
+
+        if (!is_required) {
+            continue; // Skip this header
         }
 
         // Decode any encoded words in the line
@@ -342,27 +381,11 @@ bool save_message(const std::string& message, const std::string& out_dir, int me
 
     headers = decoded_headers.str();
 
-    // Search for Content-Transfer-Encoding header
-    std::string content_transfer_encoding;
-    std::istringstream header_stream_cte(headers);
-    while (std::getline(header_stream_cte, line)) {
-        if (line.find("Content-Transfer-Encoding:") != std::string::npos) {
-            content_transfer_encoding = line.substr(line.find(":") + 1);
-            // Trim whitespace
-            content_transfer_encoding.erase(0, content_transfer_encoding.find_first_not_of(" \t"));
-            content_transfer_encoding.erase(content_transfer_encoding.find_last_not_of(" \t\r\n") + 1);
-            break;
-        }
-    }
-
-    // Convert to lower case for comparison
-    std::transform(content_transfer_encoding.begin(), content_transfer_encoding.end(), content_transfer_encoding.begin(), ::tolower);
-
     // Decode body if necessary
     if (content_transfer_encoding == "base64") {
         body = base64_decode(body);
     } else if (content_transfer_encoding == "quoted-printable") {
-        // Implement quoted-printable decoding if needed
+        // TODO: Implement quoted-printable decoding
     }
 
     // Reconstruct the message
@@ -499,7 +522,7 @@ bool fetch_messages(Connection& conn, const std::string& fetch_command, const st
         return false;
     }
 
-    std::cout << "Fetched and saved " << message_number - 1 << " messages." << std::endl;
+    std::cout << "Downloaded " << message_number - 1 << " messages." << std::endl;
     return true;
 }
 
