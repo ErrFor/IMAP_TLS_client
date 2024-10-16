@@ -10,6 +10,7 @@
 #include <chrono>
 #include <thread>
 #include <sys/stat.h>
+#include <netdb.h>
 
 void initialize_ssl() {
     SSL_load_error_strings();
@@ -32,27 +33,42 @@ void cleanup_ssl(SSL_CTX* ctx) {
     EVP_cleanup();
 }
 
-int connect_to_server(const std::string& server_ip, int port, SSL_CTX* ctx, bool use_tls) {
+int connect_to_server(const std::string& server, int port, SSL_CTX* ctx, bool use_tls) {
     int sockfd;
     struct sockaddr_in serv_addr;
+    struct addrinfo hints, *res;
 
-    if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        std::cerr << "Socket creation error" << std::endl;
+    // Очищаем структуру hints и заполняем её
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET; // Используем IPv4
+    hints.ai_socktype = SOCK_STREAM; // TCP
+
+    // Получаем информацию об адресе
+    if (getaddrinfo(server.c_str(), nullptr, &hints, &res) != 0) {
+        std::cerr << "Invalid address/Domain name not supported" << std::endl;
         return -1;
     }
 
+    // Заполняем структуру sockaddr_in
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
+    serv_addr.sin_addr = ((struct sockaddr_in*)res->ai_addr)->sin_addr;
 
-    if (inet_pton(AF_INET, server_ip.c_str(), &serv_addr.sin_addr) <= 0) {
-        std::cerr << "Invalid address/ Address not supported" << std::endl;
+    // Создаём сокет
+    if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        std::cerr << "Socket creation error" << std::endl;
+        freeaddrinfo(res);
         return -1;
     }
 
+    // Подключаемся к серверу
     if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
         std::cerr << "Connection Failed" << std::endl;
+        freeaddrinfo(res);
         return -1;
     }
+
+    freeaddrinfo(res);
 
     if (use_tls) {
         SSL* ssl = SSL_new(ctx);
