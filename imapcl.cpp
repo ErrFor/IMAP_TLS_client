@@ -76,11 +76,70 @@ int connect_to_server(const std::string& server_ip, int port, SSL_CTX* ctx, bool
     return sockfd;
 }
 
+bool login(int sockfd, const std::string& username, const std::string& password) {
+    std::string login_cmd = "a001 LOGIN " + username + " " + password + "\r\n";
+    send(sockfd, login_cmd.c_str(), login_cmd.length(), 0);
+
+    char buffer[1024] = {0};
+    int bytes_received = recv(sockfd, buffer, sizeof(buffer), 0);
+    if (bytes_received > 0) {
+        std::string response(buffer);
+        std::cout << "Server response: " << response << std::endl;
+        if (response.find("OK") != std::string::npos) {
+            std::cout << "Login successful" << std::endl;
+            return true;
+        } else {
+            std::cerr << "Login failed" << std::endl;
+            return false;
+        }
+    } else {
+        std::cerr << "No response from server during login" << std::endl;
+        return false;
+    }
+}
+
+bool read_credentials(const std::string& filepath, std::string& username, std::string& password) {
+    std::ifstream file(filepath);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open credentials file" << std::endl;
+        return false;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        size_t pos = line.find("username = ");
+        if (pos != std::string::npos) {
+            username = line.substr(pos + 11);
+        }
+
+        pos = line.find("password = ");
+        if (pos != std::string::npos) {
+            password = line.substr(pos + 11);
+        }
+    }
+
+    file.close();
+
+    if (username.empty() || password.empty()) {
+        std::cerr << "Credentials file is missing username or password" << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
 int main(int argc, char* argv[]) {
     // Параметры по умолчанию
     std::string server_ip = "127.0.0.1";
     int port = 143;
     bool use_tls = false;
+    std::string credentials_file = "credentials.txt"; // Имя файла с учётными данными
+
+    // Чтение учётных данных
+    std::string username, password;
+    if (!read_credentials(credentials_file, username, password)) {
+        return EXIT_FAILURE;
+    }
 
     // Инициализация OpenSSL
     initialize_ssl();
@@ -90,6 +149,14 @@ int main(int argc, char* argv[]) {
     int sockfd = connect_to_server(server_ip, port, ctx, use_tls);
     if (sockfd < 0) {
         std::cerr << "Failed to connect to server" << std::endl;
+        cleanup_ssl(ctx);
+        return EXIT_FAILURE;
+    }
+
+    // Авторизация на сервере
+    if (!login(sockfd, username, password)) {
+        std::cerr << "Authentication failed" << std::endl;
+        close(sockfd);
         cleanup_ssl(ctx);
         return EXIT_FAILURE;
     }
