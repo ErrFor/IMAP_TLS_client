@@ -287,10 +287,31 @@ bool login(Connection& conn, const std::string& username, const std::string& pas
     }
 }
 
-bool select_mailbox(Connection& conn, const std::string& mailbox) {
+bool select_mailbox(Connection& conn, const std::string& mailbox, int& message_count) {
     std::string select_cmd = "a002 SELECT " + mailbox + "\r\n";
     std::string response;
-    return send_command(conn, select_cmd, response);
+    if (!send_command(conn, select_cmd, response)) {
+        return false;
+    }
+
+    // Initialize message count
+    message_count = 0;
+
+    // Parse response to find the number of messages
+    std::istringstream response_stream(response);
+    std::string line;
+    while (std::getline(response_stream, line)) {
+        if (line.find("* ") == 0 && line.find("EXISTS") != std::string::npos) {
+            std::istringstream line_stream(line);
+            std::string asterisk, num_str, exists;
+            line_stream >> asterisk >> num_str >> exists;
+            if (exists == "EXISTS") {
+                message_count = std::stoi(num_str);
+            }
+        }
+    }
+
+    return true;
 }
 
 bool save_message(const std::string& message, const std::string& out_dir, int message_number) {
@@ -449,80 +470,97 @@ bool read_literal(Connection& conn, int size, std::string& data) {
     return true;
 }
 
-bool fetch_messages(Connection& conn, const std::string& fetch_command, const std::string& out_dir) {
-    // Send the FETCH command
-    int bytes_sent;
-    if (conn.use_tls) {
-        bytes_sent = SSL_write(conn.ssl, fetch_command.c_str(), fetch_command.length());
-    } else {
-        bytes_sent = send(conn.sockfd, fetch_command.c_str(), fetch_command.length(), 0);
-    }
+bool fetch_messages(Connection& conn, const std::vector<int>& message_numbers, bool only_headers, const std::string& out_dir, const std::string& mailbox, bool only_new) {
+    int message_count = message_numbers.size();
+    int messages_fetched = 0;
 
-    if (bytes_sent <= 0) {
-        std::cerr << "Failed to send fetch command" << std::endl;
-        return false;
-    }
+    for (int msg_num : message_numbers) {
+        std::string fetch_command;
+        if (only_headers) {
+            fetch_command = "a003 FETCH " + std::to_string(msg_num) + " (BODY.PEEK[HEADER])\r\n";
+        } else {
+            fetch_command = "a003 FETCH " + std::to_string(msg_num) + " (RFC822)\r\n";
+        }
 
-    int message_number = 1; // Message number, starting from 1
+        // Send the FETCH command
+        int bytes_sent;
+        if (conn.use_tls) {
+            bytes_sent = SSL_write(conn.ssl, fetch_command.c_str(), fetch_command.length());
+        } else {
+            bytes_sent = send(conn.sockfd, fetch_command.c_str(), fetch_command.length(), 0);
+        }
 
-    while (true) {
-        std::string line;
-        if (!read_line(conn, line)) {
-            std::cerr << "Error reading from socket" << std::endl;
+        if (bytes_sent <= 0) {
+            std::cerr << "Failed to send fetch command" << std::endl;
             return false;
         }
 
-        std::cout << "Server line: " << line << std::endl;
+        // Read response
+        std::string line;
+        while (true) {
+            if (!read_line(conn, line)) {
+                std::cerr << "Error reading from socket" << std::endl;
+                return false;
+            }
 
-        // Check for completion of the command
-        if (line.find("OK") != std::string::npos && line[0] == 'a') {
-            // End of response
-            break;
-        } else if (line[0] == '*') {
-            // Possible data
-            if (line.find("FETCH") != std::string::npos) {
-                // Check if line contains a literal indicator {number}
-                size_t pos = line.find("{");
-                if (pos != std::string::npos) {
-                    size_t end_pos = line.find("}", pos);
-                    if (end_pos != std::string::npos) {
-                        std::string num_str = line.substr(pos + 1, end_pos - pos - 1);
-                        int literal_size = std::stoi(num_str);
+            // Check for completion of the command
+            if (line.find("OK") != std::string::npos && line[0] == 'a') {
+                // End of response
+                break;
+            } else if (line[0] == '*') {
+                // Possible data
+                if (line.find("FETCH") != std::string::npos) {
+                    // Check if line contains a literal indicator {number}
+                    size_t pos = line.find("{");
+                    if (pos != std::string::npos) {
+                        size_t end_pos = line.find("}", pos);
+                        if (end_pos != std::string::npos) {
+                            std::string num_str = line.substr(pos + 1, end_pos - pos - 1);
+                            int literal_size = std::stoi(num_str);
 
-                        // Read the literal data
-                        std::string literal_data;
-                        if (!read_literal(conn, literal_size, literal_data)) {
-                            std::cerr << "Error reading literal data" << std::endl;
-                            return false;
+                            // Read the literal data
+                            std::string literal_data;
+                            if (!read_literal(conn, literal_size, literal_data)) {
+                                std::cerr << "Error reading literal data" << std::endl;
+                                return false;
+                            }
+
+                            // Read the closing parenthesis
+                            if (!read_line(conn, line)) {
+                                std::cerr << "Error reading from socket" << std::endl;
+                                return false;
+                            }
+
+                            // Save the message
+                            if (!save_message(literal_data, out_dir, msg_num)) {
+                                std::cerr << "Failed to save message number: " << msg_num << std::endl;
+                                return false;
+                            }
+
+                            messages_fetched++;
                         }
-
-                        // Read the closing parenthesis
-                        if (!read_line(conn, line)) {
-                            std::cerr << "Error reading from socket" << std::endl;
-                            return false;
-                        }
-
-                        // Save the message
-                        if (!save_message(literal_data, out_dir, message_number)) {
-                            std::cerr << "Failed to save message number: " << message_number << std::endl;
-                            return false;
-                        }
-
-                        message_number++;
                     }
                 }
             }
-        } else {
-            // Other lines, ignore or process as needed
         }
     }
 
-    if (message_number == 1) {
-        std::cout << "No messages found" << std::endl;
+    if (messages_fetched == 0) {
+        std::cout << "No messages fetched" << std::endl;
         return false;
     }
 
-    std::cout << "Downloaded " << message_number - 1 << " messages." << std::endl;
+    // Output information about the number of downloaded messages
+    if (only_headers && only_new) {
+        std::cout << "Staženy hlavičky " << messages_fetched << " nových zpráv ze schránky " << mailbox << "." << std::endl;
+    } else if (only_headers) {
+        std::cout << "Staženy hlavičky " << messages_fetched << " zpráv ze schránky " << mailbox << "." << std::endl;
+    } else if (only_new) {
+        std::cout << "Staženo " << messages_fetched << " nových zpráv ze schránky " << mailbox << "." << std::endl;
+    } else {
+        std::cout << "Staženo " << messages_fetched << " zpráv ze schránky " << mailbox << "." << std::endl;
+    }
+
     return true;
 }
 
@@ -669,7 +707,8 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    if (!select_mailbox(conn, mailbox)) {
+    int message_count = 0;
+    if (!select_mailbox(conn, mailbox, message_count)) {
         std::cerr << "Failed to select mailbox" << std::endl;
         if (conn.use_tls) {
             SSL_shutdown(conn.ssl);
@@ -680,16 +719,63 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    std::string fetch_command;
-    if (only_headers) {
-        fetch_command = "a003 FETCH 1:* (BODY.PEEK[HEADER])\r\n";
-    } else if (only_new) {
-        fetch_command = "a003 SEARCH UNSEEN\r\n";
+    std::vector<int> message_numbers;
+
+    if (only_new) {
+        // Search for unseen messages
+        std::string search_command = "a003 SEARCH UNSEEN\r\n";
+        std::string search_response;
+
+        if (!send_command(conn, search_command, search_response)) {
+            std::cerr << "Failed to search for unseen messages" << std::endl;
+            if (conn.use_tls) {
+                SSL_shutdown(conn.ssl);
+                SSL_free(conn.ssl);
+            }
+            close(conn.sockfd);
+            cleanup_ssl(ctx);
+            return EXIT_FAILURE;
+        }
+
+        // Parse SEARCH response
+        std::istringstream response_stream(search_response);
+        std::string line;
+        while (std::getline(response_stream, line)) {
+            if (line.find("* SEARCH") != std::string::npos) {
+                std::istringstream line_stream(line);
+                std::string token;
+                line_stream >> token; // Skip "*"
+                line_stream >> token; // Skip "SEARCH"
+
+                while (line_stream >> token) {
+                    int msg_num = std::stoi(token);
+                    message_numbers.push_back(msg_num);
+                }
+            } else if (line.find("OK") != std::string::npos) {
+                // End of response
+                break;
+            }
+        }
+
+        if (message_numbers.empty()) {
+            std::cout << "Žádné nové zprávy ve schránce " << mailbox << "." << std::endl;
+            // Close connection and exit
+            if (conn.use_tls) {
+                SSL_shutdown(conn.ssl);
+                SSL_free(conn.ssl);
+            }
+            close(conn.sockfd);
+            cleanup_ssl(ctx);
+            return 0;
+        }
     } else {
-        fetch_command = "a003 FETCH 1:* (RFC822)\r\n";
+        // Get all message numbers
+        for (int i = 1; i <= message_count; ++i) {
+            message_numbers.push_back(i);
+        }
     }
 
-    if (!fetch_messages(conn, fetch_command, out_dir)) {
+    if (!fetch_messages(conn, message_numbers, only_headers, out_dir, mailbox, only_new)) {
         if (conn.use_tls) {
             SSL_shutdown(conn.ssl);
             SSL_free(conn.ssl);
