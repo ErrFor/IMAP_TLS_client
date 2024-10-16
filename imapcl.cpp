@@ -1,5 +1,7 @@
 #include <iostream>
+#include <string>
 #include <fstream>
+#include <regex>
 #include <sstream>
 #include <vector>
 #include <cstring>
@@ -7,8 +9,9 @@
 #include <arpa/inet.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-#include <chrono>
-#include <thread>
+#include <openssl/bio.h>
+#include <openssl/evp.h>
+#include <openssl/buffer.h>
 #include <sys/stat.h>
 #include <netdb.h>
 
@@ -18,7 +21,7 @@ void initialize_ssl() {
 }
 
 SSL_CTX* create_context() {
-    const SSL_METHOD* method = SSLv23_client_method();
+    const SSL_METHOD* method = TLS_client_method();
     SSL_CTX* ctx = SSL_CTX_new(method);
     if (!ctx) {
         std::cerr << "Unable to create SSL context" << std::endl;
@@ -30,72 +33,96 @@ SSL_CTX* create_context() {
 
 void cleanup_ssl(SSL_CTX* ctx) {
     SSL_CTX_free(ctx);
-    EVP_cleanup();
+    EVP_cleanup(); 
 }
 
-int connect_to_server(const std::string& server, int port, SSL_CTX* ctx, bool use_tls) {
+struct Connection {
+    int sockfd;
+    SSL* ssl;
+    bool use_tls;
+};
+
+Connection connect_to_server(const std::string& server, int port, SSL_CTX* ctx, bool use_tls) {
     int sockfd;
     struct sockaddr_in serv_addr;
-    struct addrinfo hints, *res;
+    struct addrinfo hints{}, *res;
 
-    // Очищаем структуру hints и заполняем её
+    // Clear and set hints structure
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET; // Используем IPv4
+    hints.ai_family = AF_INET; // IPv4
     hints.ai_socktype = SOCK_STREAM; // TCP
 
-    // Получаем информацию об адресе
+    // Get address info
     if (getaddrinfo(server.c_str(), nullptr, &hints, &res) != 0) {
         std::cerr << "Invalid address/Domain name not supported" << std::endl;
-        return -1;
+        exit(EXIT_FAILURE);
     }
 
-    // Заполняем структуру sockaddr_in
+    // Set up sockaddr_in structure
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(port);
     serv_addr.sin_addr = ((struct sockaddr_in*)res->ai_addr)->sin_addr;
 
-    // Создаём сокет
+    // Create socket
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         std::cerr << "Socket creation error" << std::endl;
         freeaddrinfo(res);
-        return -1;
+        exit(EXIT_FAILURE);
     }
 
-    // Подключаемся к серверу
+    // Connect to server
     if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
         std::cerr << "Connection Failed" << std::endl;
         freeaddrinfo(res);
-        return -1;
+        exit(EXIT_FAILURE);
     }
 
     freeaddrinfo(res);
 
+    SSL* ssl = nullptr;
     if (use_tls) {
-        SSL* ssl = SSL_new(ctx);
+        ssl = SSL_new(ctx);
         SSL_set_fd(ssl, sockfd);
 
         if (SSL_connect(ssl) <= 0) {
             std::cerr << "SSL connection failed" << std::endl;
             ERR_print_errors_fp(stderr);
             SSL_free(ssl);
-            return -1;
+            close(sockfd);
+            exit(EXIT_FAILURE);
         }
 
         std::cout << "Connected with SSL encryption" << std::endl;
-        SSL_free(ssl);
     } else {
         std::cout << "Connected without encryption" << std::endl;
     }
 
-    return sockfd;
+    return {sockfd, ssl, use_tls};
 }
 
-bool send_command(int sockfd, const std::string& command, std::string& response) {
-    send(sockfd, command.c_str(), command.length(), 0);
+bool send_command(Connection& conn, const std::string& command, std::string& response) {
+    int bytes_sent;
+    if (conn.use_tls) {
+        bytes_sent = SSL_write(conn.ssl, command.c_str(), command.length());
+    } else {
+        bytes_sent = send(conn.sockfd, command.c_str(), command.length(), 0);
+    }
+
+    if (bytes_sent <= 0) {
+        std::cerr << "Failed to send command" << std::endl;
+        return false;
+    }
 
     char buffer[4096] = {0};
-    int bytes_received = recv(sockfd, buffer, sizeof(buffer), 0);
+    int bytes_received;
+    if (conn.use_tls) {
+        bytes_received = SSL_read(conn.ssl, buffer, sizeof(buffer) - 1);
+    } else {
+        bytes_received = recv(conn.sockfd, buffer, sizeof(buffer) - 1, 0);
+    }
+
     if (bytes_received > 0) {
+        buffer[bytes_received] = '\0';
         response = std::string(buffer);
         std::cout << "Server response: " << response << std::endl;
         return response.find("OK") != std::string::npos;
@@ -105,22 +132,40 @@ bool send_command(int sockfd, const std::string& command, std::string& response)
     }
 }
 
-bool receive_response(int sockfd, std::string& response) {
-    char buffer[4096] = {0};
+bool receive_response(Connection& conn, std::string& response) {
+    char buffer[4096];
     response.clear();
 
-    int bytes_received = recv(sockfd, buffer, sizeof(buffer), 0);
-    if (bytes_received > 0) {
-        response = std::string(buffer);
-        std::cout << "Server response: " << response << std::endl;
-        return true;
-    } else {
-        std::cerr << "No response from server" << std::endl;
-        return false;
+    while (true) {
+        int bytes_received;
+        if (conn.use_tls) {
+            bytes_received = SSL_read(conn.ssl, buffer, sizeof(buffer) - 1);
+        } else {
+            bytes_received = recv(conn.sockfd, buffer, sizeof(buffer) - 1, 0);
+        }
+
+        if (bytes_received < 0) {
+            std::cerr << "Error reading from socket" << std::endl;
+            return false;
+        } else if (bytes_received == 0) {
+            // Connection closed
+            break;
+        }
+
+        buffer[bytes_received] = '\0';
+        response += buffer;
+
+        // Check if response ends with CRLF
+        if (response.find("\r\n") != std::string::npos) {
+            break;
+        }
     }
+
+    std::cout << "Server response: " << response << std::endl;
+    return true;
 }
 
-// Функция для кодирования в Base64
+// Function to encode in Base64
 std::string base64_encode(const std::string& input) {
     BIO* bio, *b64;
     BUF_MEM* buffer_ptr;
@@ -140,63 +185,321 @@ std::string base64_encode(const std::string& input) {
     return output;
 }
 
-bool login(int sockfd, const std::string& username, const std::string& password) {
+std::string base64_decode(const std::string& encoded_data) {
+    // Remove any whitespace or newlines from the encoded data
+    std::string clean_input;
+    for (char c : encoded_data) {
+        if (!isspace(static_cast<unsigned char>(c))) {
+            clean_input += c;
+        }
+    }
+
+    int encoded_length = clean_input.length();
+    int decoded_length = (encoded_length / 4) * 3;
+
+    // Allocate buffer for decoded data
+    std::vector<unsigned char> decoded_data(decoded_length + 1); // +1 for null terminator
+
+    int output_length = EVP_DecodeBlock(decoded_data.data(), reinterpret_cast<const unsigned char*>(clean_input.c_str()), encoded_length);
+    if (output_length < 0) {
+        // Error decoding base64
+        std::cerr << "Error decoding base64" << std::endl;
+        return encoded_data; // Return original if decoding fails
+    }
+
+    // Adjust for padding
+    if (clean_input[encoded_length - 1] == '=') {
+        output_length--;
+        if (clean_input[encoded_length - 2] == '=') {
+            output_length--;
+        }
+    }
+
+    decoded_data.resize(output_length);
+    return std::string(decoded_data.begin(), decoded_data.end());
+}
+
+// Function to decode an encoded word as per RFC 2047
+std::string decode_encoded_word(const std::string& encoded_word) {
+    std::regex r(R"(=\?([^?]+)\?([bBqQ])\?([^?]+)\?=)");
+    std::smatch m;
+    if (std::regex_match(encoded_word, m, r)) {
+        std::string charset = m[1].str();
+        std::string encoding = m[2].str();
+        std::string encoded_text = m[3].str();
+
+        // For simplicity, assume charset is UTF-8
+        std::string decoded_text;
+
+        if (encoding == "B" || encoding == "b") {
+            // Base64 decoding
+            decoded_text = base64_decode(encoded_text);
+        } else if (encoding == "Q" || encoding == "q") {
+            // Quoted-Printable decoding (not implemented here)
+            decoded_text = encoded_text; // Placeholder
+        } else {
+            // Unknown encoding
+            decoded_text = encoded_word;
+        }
+
+        return decoded_text;
+    } else {
+        // Not an encoded word
+        return encoded_word;
+    }
+}
+
+bool login(Connection& conn, const std::string& username, const std::string& password) {
     std::string response;
 
-    // Сначала обрабатываем приветственное сообщение сервера
-    if (!receive_response(sockfd, response)) {
+    // Receive server's greeting
+    if (!receive_response(conn, response)) {
         return false;
     }
 
-    // Формируем строку для AUTHENTICATE PLAIN
-    std::string auth_data = "\0" + username + "\0" + password;
-    std::string encoded_auth_data = base64_encode(auth_data);
-
-    // Отправляем команду AUTHENTICATE PLAIN
-    std::string auth_cmd = "a001 AUTHENTICATE PLAIN\r\n";
-    send(sockfd, auth_cmd.c_str(), auth_cmd.length(), 0);
-
-    // Ждём ответа сервера
-    if (!receive_response(sockfd, response) || response[0] != '+') {
-        std::cerr << "Server did not accept AUTHENTICATE PLAIN command" << std::endl;
-        return false;
-    }
-
-    // Отправляем Base64-закодированную строку
-    std::string auth_data_cmd = encoded_auth_data + "\r\n";
-    send(sockfd, auth_data_cmd.c_str(), auth_data_cmd.length(), 0);
-
-    // Читаем ответ сервера
-    while (receive_response(sockfd, response)) {
-        if (response.find("OK") != std::string::npos) {
-            std::cout << "Login successful" << std::endl;
-            return true;
-        } else if (response.find("NO") != std::string::npos || response.find("BAD") != std::string::npos) {
+    // Check supported authentication methods
+    if (response.find("AUTH=LOGIN") != std::string::npos) {
+        // Use LOGIN mechanism
+        std::string login_cmd = "a001 LOGIN " + username + " " + password + "\r\n";
+        if (!send_command(conn, login_cmd, response)) {
             std::cerr << "Login failed" << std::endl;
             return false;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
 
-    return false;
+        std::cout << "Login successful" << std::endl;
+        return true;
+    } else if (response.find("AUTH=PLAIN") != std::string::npos) {
+        // Use PLAIN mechanism
+        std::string auth_data = "\0" + username + "\0" + password;
+        std::string encoded_auth_data = base64_encode(auth_data);
+
+        std::string auth_cmd = "a001 AUTHENTICATE PLAIN " + encoded_auth_data + "\r\n";
+        if (!send_command(conn, auth_cmd, response)) {
+            std::cerr << "Authentication failed" << std::endl;
+            return false;
+        }
+
+        std::cout << "Login successful" << std::endl;
+        return true;
+    } else {
+        std::cerr << "No supported authentication method found" << std::endl;
+        return false;
+    }
 }
 
-bool select_mailbox(int sockfd, const std::string& mailbox) {
+bool select_mailbox(Connection& conn, const std::string& mailbox) {
     std::string select_cmd = "a002 SELECT " + mailbox + "\r\n";
     std::string response;
-    return send_command(sockfd, select_cmd, response);
+    return send_command(conn, select_cmd, response);
 }
 
-bool fetch_messages(int sockfd, const std::string& fetch_command, const std::string& out_dir) {
-    std::string response;
-    if (!send_command(sockfd, fetch_command, response)) {
-        std::cerr << "Failed to fetch messages" << std::endl;
+bool save_message(const std::string& message, const std::string& out_dir, int message_number) {
+    // Separate headers and body
+    size_t header_end = message.find("\r\n\r\n");
+    if (header_end == std::string::npos) {
+        header_end = message.find("\n\n");
+        if (header_end == std::string::npos) {
+            std::cerr << "Failed to find separator between headers and body" << std::endl;
+            return false;
+        }
+    }
+
+    std::string headers = message.substr(0, header_end);
+    std::string body = message.substr(header_end + ((message[header_end] == '\r' && message[header_end + 1] == '\n') ? 4 : 2));
+
+    // Decode headers
+    std::istringstream header_stream(headers);
+    std::ostringstream decoded_headers;
+    std::string line;
+    while (std::getline(header_stream, line)) {
+        // Remove CR if present
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        // Decode any encoded words in the line
+        std::regex r(R"(=\?[^?]+\?[bBqQ]\?[^?]+\?=)");
+        std::smatch m;
+        std::string decoded_line;
+        std::string::const_iterator search_start(line.cbegin());
+        while (std::regex_search(search_start, line.cend(), m, r)) {
+            // Append text before the match
+            decoded_line += m.prefix().str();
+
+            // Decode the encoded word
+            std::string encoded_word = m.str();
+            std::string decoded_word = decode_encoded_word(encoded_word);
+
+            decoded_line += decoded_word;
+
+            search_start = m.suffix().first;
+        }
+        // Append the rest of the line
+        decoded_line += std::string(search_start, line.cend());
+
+        decoded_headers << decoded_line << "\r\n";
+    }
+
+    headers = decoded_headers.str();
+
+    // Search for Content-Transfer-Encoding header
+    std::string content_transfer_encoding;
+    std::istringstream header_stream_cte(headers);
+    while (std::getline(header_stream_cte, line)) {
+        if (line.find("Content-Transfer-Encoding:") != std::string::npos) {
+            content_transfer_encoding = line.substr(line.find(":") + 1);
+            // Trim whitespace
+            content_transfer_encoding.erase(0, content_transfer_encoding.find_first_not_of(" \t"));
+            content_transfer_encoding.erase(content_transfer_encoding.find_last_not_of(" \t\r\n") + 1);
+            break;
+        }
+    }
+
+    // Convert to lower case for comparison
+    std::transform(content_transfer_encoding.begin(), content_transfer_encoding.end(), content_transfer_encoding.begin(), ::tolower);
+
+    // Decode body if necessary
+    if (content_transfer_encoding == "base64") {
+        body = base64_decode(body);
+    } else if (content_transfer_encoding == "quoted-printable") {
+        // Implement quoted-printable decoding if needed
+    }
+
+    // Reconstruct the message
+    std::string full_message = headers + "\r\n" + body;
+
+    // Save to file
+    std::string file_path = out_dir + "/message_" + std::to_string(message_number) + ".txt";
+    std::ofstream outfile(file_path);
+
+    if (!outfile.is_open()) {
+        std::cerr << "Failed to open file: " << file_path << std::endl;
         return false;
     }
 
-    // Здесь необходимо добавить код для сохранения сообщений в файлы
-    // Используем out_dir для указания каталога для сохранения сообщений
+    outfile << full_message;
+    outfile.close();
+    return true;
+}
 
+bool read_line(Connection& conn, std::string& line) {
+    line.clear();
+    char c;
+    while (true) {
+        int n;
+        if (conn.use_tls) {
+            n = SSL_read(conn.ssl, &c, 1);
+        } else {
+            n = recv(conn.sockfd, &c, 1, 0);
+        }
+
+        if (n <= 0) {
+            return false; // Error or connection closed
+        }
+        line += c;
+        if (line.size() >= 2 && line.substr(line.size() - 2) == "\r\n") {
+            break; // End of line
+        }
+    }
+    return true;
+}
+
+bool read_literal(Connection& conn, int size, std::string& data) {
+    data.clear();
+    char buffer[1024];
+    int remaining = size;
+    while (remaining > 0) {
+        int to_read = std::min(remaining, (int)sizeof(buffer));
+        int n;
+        if (conn.use_tls) {
+            n = SSL_read(conn.ssl, buffer, to_read);
+        } else {
+            n = recv(conn.sockfd, buffer, to_read, 0);
+        }
+
+        if (n <= 0) {
+            return false; // Error or connection closed
+        }
+        data.append(buffer, n);
+        remaining -= n;
+    }
+    return true;
+}
+
+bool fetch_messages(Connection& conn, const std::string& fetch_command, const std::string& out_dir) {
+    // Send the FETCH command
+    int bytes_sent;
+    if (conn.use_tls) {
+        bytes_sent = SSL_write(conn.ssl, fetch_command.c_str(), fetch_command.length());
+    } else {
+        bytes_sent = send(conn.sockfd, fetch_command.c_str(), fetch_command.length(), 0);
+    }
+
+    if (bytes_sent <= 0) {
+        std::cerr << "Failed to send fetch command" << std::endl;
+        return false;
+    }
+
+    int message_number = 1; // Message number, starting from 1
+
+    while (true) {
+        std::string line;
+        if (!read_line(conn, line)) {
+            std::cerr << "Error reading from socket" << std::endl;
+            return false;
+        }
+
+        std::cout << "Server line: " << line << std::endl;
+
+        // Check for completion of the command
+        if (line.find("OK") != std::string::npos && line[0] == 'a') {
+            // End of response
+            break;
+        } else if (line[0] == '*') {
+            // Possible data
+            if (line.find("FETCH") != std::string::npos) {
+                // Check if line contains a literal indicator {number}
+                size_t pos = line.find("{");
+                if (pos != std::string::npos) {
+                    size_t end_pos = line.find("}", pos);
+                    if (end_pos != std::string::npos) {
+                        std::string num_str = line.substr(pos + 1, end_pos - pos - 1);
+                        int literal_size = std::stoi(num_str);
+
+                        // Read the literal data
+                        std::string literal_data;
+                        if (!read_literal(conn, literal_size, literal_data)) {
+                            std::cerr << "Error reading literal data" << std::endl;
+                            return false;
+                        }
+
+                        // Read the closing parenthesis
+                        if (!read_line(conn, line)) {
+                            std::cerr << "Error reading from socket" << std::endl;
+                            return false;
+                        }
+
+                        // Save the message
+                        if (!save_message(literal_data, out_dir, message_number)) {
+                            std::cerr << "Failed to save message number: " << message_number << std::endl;
+                            return false;
+                        }
+
+                        message_number++;
+                    }
+                }
+            }
+        } else {
+            // Other lines, ignore or process as needed
+        }
+    }
+
+    if (message_number == 1) {
+        std::cout << "No messages found" << std::endl;
+        return false;
+    }
+
+    std::cout << "Fetched and saved " << message_number - 1 << " messages." << std::endl;
     return true;
 }
 
@@ -233,11 +536,11 @@ bool read_credentials(const std::string& filepath, std::string& username, std::s
 bool directory_exists(const std::string& path) {
     struct stat info;
     if (stat(path.c_str(), &info) != 0) {
-        return false; // Каталог не существует
+        return false; // Directory does not exist
     } else if (info.st_mode & S_IFDIR) {
-        return true; // Это каталог
+        return true; // It's a directory
     } else {
-        return false; // Это не каталог
+        return false; // Not a directory
     }
 }
 
@@ -263,7 +566,7 @@ int main(int argc, char* argv[]) {
                 break;
             case 'T':
                 use_tls = true;
-                port = 993; // Если включено шифрование, используем порт 993 по умолчанию
+                port = 993; // Default port for TLS
                 break;
             case 'C':
                 cert_dir = optarg;
@@ -292,7 +595,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Проверяем, передан ли IP сервера как обязательный аргумент
+    // Check if server IP is provided
     if (optind >= argc) {
         std::cerr << "Error: server IP or domain name is required\n";
         return EXIT_FAILURE;
@@ -316,7 +619,7 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    // Проверка на существование выходного каталога
+    // Check if output directory exists
     if (!directory_exists(out_dir)) {
         std::cerr << "Error: output directory does not exist: " << out_dir << "\n";
         return EXIT_FAILURE;
@@ -330,23 +633,26 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    int sockfd = connect_to_server(server_ip, port, ctx, use_tls);
-    if (sockfd < 0) {
-        std::cerr << "Failed to connect to server" << std::endl;
-        cleanup_ssl(ctx);
-        return EXIT_FAILURE;
-    }
+    Connection conn = connect_to_server(server_ip, port, ctx, use_tls);
 
-    if (!login(sockfd, username, password)) {
+    if (!login(conn, username, password)) {
         std::cerr << "Authentication failed" << std::endl;
-        close(sockfd);
+        if (conn.use_tls) {
+            SSL_shutdown(conn.ssl);
+            SSL_free(conn.ssl);
+        }
+        close(conn.sockfd);
         cleanup_ssl(ctx);
         return EXIT_FAILURE;
     }
 
-    if (!select_mailbox(sockfd, mailbox)) {
+    if (!select_mailbox(conn, mailbox)) {
         std::cerr << "Failed to select mailbox" << std::endl;
-        close(sockfd);
+        if (conn.use_tls) {
+            SSL_shutdown(conn.ssl);
+            SSL_free(conn.ssl);
+        }
+        close(conn.sockfd);
         cleanup_ssl(ctx);
         return EXIT_FAILURE;
     }
@@ -360,13 +666,21 @@ int main(int argc, char* argv[]) {
         fetch_command = "a003 FETCH 1:* (RFC822)\r\n";
     }
 
-    if (!fetch_messages(sockfd, fetch_command, out_dir)) {
-        close(sockfd);
+    if (!fetch_messages(conn, fetch_command, out_dir)) {
+        if (conn.use_tls) {
+            SSL_shutdown(conn.ssl);
+            SSL_free(conn.ssl);
+        }
+        close(conn.sockfd);
         cleanup_ssl(ctx);
         return EXIT_FAILURE;
     }
 
-    close(sockfd);
+    if (conn.use_tls) {
+        SSL_shutdown(conn.ssl);
+        SSL_free(conn.ssl);
+    }
+    close(conn.sockfd);
     cleanup_ssl(ctx);
     return 0;
 }
