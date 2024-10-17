@@ -92,9 +92,16 @@ Connection connect_to_server(const std::string& server, int port, SSL_CTX* ctx, 
             exit(EXIT_FAILURE);
         }
 
-        std::cout << "Connected with SSL encryption" << std::endl;
-    } else {
-        std::cout << "Connected without encryption" << std::endl;
+        // Проверяем результат проверки сертификата
+        long verify_result = SSL_get_verify_result(ssl);
+        if (verify_result != X509_V_OK) {
+            std::cerr << "Certificate verification failed\n" << server << ".\n";
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
+            close(sockfd);
+            cleanup_ssl(ctx);
+            exit(EXIT_FAILURE);
+        }
     }
 
     return {sockfd, ssl, use_tls};
@@ -686,12 +693,25 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    if (use_tls && (!cert_file.empty() || !cert_dir.empty())) {
-        if (SSL_CTX_load_verify_locations(ctx, cert_file.empty() ? nullptr : cert_file.c_str(), cert_dir.c_str()) <= 0) {
-            std::cerr << "Error loading certificates\n";
-            cleanup_ssl(ctx);
-            return EXIT_FAILURE;
+    if (use_tls) {
+        if (!cert_file.empty() || !cert_dir.empty()) {
+            if (SSL_CTX_load_verify_locations(ctx, cert_file.empty() ? nullptr : cert_file.c_str(),
+                                             cert_dir.empty() ? nullptr : cert_dir.c_str()) <= 0) {
+                std::cerr << "Error loading certificates\n";
+                cleanup_ssl(ctx);
+                return EXIT_FAILURE;
+            }
+        } else {
+            // Используем системные сертификаты по умолчанию
+            if (SSL_CTX_set_default_verify_paths(ctx) != 1) {
+                std::cerr << "Error setting default verify paths\n";
+                cleanup_ssl(ctx);
+                return EXIT_FAILURE;
+            }
         }
+
+        // Устанавливаем режим проверки сертификата сервера
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
     }
 
     Connection conn = connect_to_server(server_ip, port, ctx, use_tls);
