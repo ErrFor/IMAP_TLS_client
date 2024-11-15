@@ -15,6 +15,8 @@ int main(int argc, char* argv[]) {
     std::string cert_file;
     std::string cert_dir = "/etc/ssl/certs";
     std::string credentials_file;
+    bool cert_file_set = false;
+    bool cert_dir_set = false;
     std::string mailbox = "INBOX";
     std::string out_dir;
     bool only_headers = false;
@@ -39,9 +41,11 @@ int main(int argc, char* argv[]) {
                 break;
             case 'C':
                 cert_dir = optarg;
+                cert_dir_set = true;
                 break;
             case 'c':
                 cert_file = optarg;
+                cert_file_set = true;
                 break;
             case 'a':
                 credentials_file = optarg;
@@ -70,17 +74,38 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
     server_ip = argv[optind];
+    
+    optind++;
+
+    // Checking for additional non-option arguments
+    if (optind < argc) {
+        std::cerr << "Error: unexpected argument(s): ";
+        while (optind < argc) {
+            std::cerr << argv[optind++] << " ";
+        }
+        std::cerr << "\nUsage: " << argv[0] << " server [-p port] [-T [-c certfile] [-C certaddr]] [-n] [-h] -a auth_file [-b MAILBOX] -o out_dir\n";
+        return EXIT_FAILURE;
+    }
+
+    // Check dependencies between options
+    if ((cert_file_set || cert_dir_set) && !use_tls) {
+        std::cerr << "Error: -C and -c options require -T to be specified.\n";
+        std::cerr << "Usage: " << argv[0] << " server [-p port] [-T [-c certfile] [-C certaddr]] [-n] [-h] -a auth_file [-b MAILBOX] -o out_dir\n";
+        return EXIT_FAILURE;
+    }
 
     initialize_ssl();
     SSL_CTX* ctx = create_context();
 
     if (credentials_file.empty()) {
         std::cerr << "Error: credentials file is required (-a auth_file)\n";
+        std::cerr << "Usage: " << argv[0] << " server [-p port] [-T [-c certfile] [-C certaddr]] [-n] [-h] -a auth_file [-b MAILBOX] -o out_dir\n";
         return EXIT_FAILURE;
     }
 
     if (out_dir.empty()) {
         std::cerr << "Error: output directory is required (-o out_dir)\n";
+        std::cerr << "Usage: " << argv[0] << " server [-p port] [-T [-c certfile] [-C certaddr]] [-n] [-h] -a auth_file [-b MAILBOX] -o out_dir\n";
         return EXIT_FAILURE;
     }
 
