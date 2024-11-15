@@ -1,4 +1,10 @@
-// ssl_utils.cpp
+/**
+ * @file ssl_utils.cpp
+ * 
+ * @brief Implementation of the SSL/TLS utilities.
+ * @author Slabik Yaroslav xslabi01
+ */
+
 #include "ssl_utils.h"
 #include <iostream>
 

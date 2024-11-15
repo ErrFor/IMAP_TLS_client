@@ -1,4 +1,10 @@
-// imap_client.h
+/**
+ * @file imap_client.h
+ * 
+ * @brief Header file with declarations for the IMAP client functions.
+ * @author Slabik Yaroslav xslabi01
+ */
+
 #ifndef IMAP_CLIENT_H
 #define IMAP_CLIENT_H
 

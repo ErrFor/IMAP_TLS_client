@@ -1,4 +1,10 @@
-// imap_client.cpp
+/**
+ * @file imap_client.cpp
+ * 
+ * @brief Implementation of the IMAP client functions.
+ * @author Slabik Yaroslav xslabi01
+ */
+
 #include "imap_client.h"
 #include "ssl_utils.h"
 

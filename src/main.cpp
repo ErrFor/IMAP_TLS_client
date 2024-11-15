@@ -1,4 +1,10 @@
-// main.cpp
+/**
+ * @file main.cpp
+ * 
+ * @brief Main program file.
+ * @author Slabik Yaroslav xslabi01
+ */
+
 #include <iostream>
 #include <string>
 #include <vector>
@@ -74,7 +80,7 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
     server_ip = argv[optind];
-    
+
     optind++;
 
     // Checking for additional non-option arguments

@@ -1,4 +1,10 @@
-// ssl_utils.h
+/**
+ * @file ssl_utils.h
+ * 
+ * @brief Header file with declarations for SSL/TLS utilities.
+ * @author Slabik Yaroslav xslabi01
+ */
+
 #ifndef SSL_UTILS_H
 #define SSL_UTILS_H
 

@@ -1,4 +1,6 @@
-# Makefile
+# @file Makefile
+# @brief Build file for compiling the program.
+# @author Slabik Yaroslav xslabi01
 
 CXX = g++
 CXXFLAGS = -std=c++11 -Wall -Wextra -pedantic
