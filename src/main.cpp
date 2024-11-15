@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include "imap_client.h"
 #include "ssl_utils.h"
+#include <dirent.h>
 
 int main(int argc, char* argv[]) {
     std::string server_ip;
@@ -89,17 +90,49 @@ int main(int argc, char* argv[]) {
     }
 
     if (use_tls) {
+        // Use default system certificates
+        if (SSL_CTX_set_default_verify_paths(ctx) != 1) {
+            std::cerr << "Error setting default verify paths\n";
+            cleanup_ssl(ctx);
+            return EXIT_FAILURE;
+        }
+
+        // If user certificates are specified, download them additionally
         if (!cert_file.empty() || !cert_dir.empty()) {
-            if (SSL_CTX_load_verify_locations(ctx, cert_file.empty() ? nullptr : cert_file.c_str(),
-                                             cert_dir.empty() ? nullptr : cert_dir.c_str()) <= 0) {
-                std::cerr << "Error loading certificates\n";
-                cleanup_ssl(ctx);
-                return EXIT_FAILURE;
+            // Check that the certificate directory is not empty and contains certificates
+            if (!cert_dir.empty()) {
+                DIR* dir = opendir(cert_dir.c_str());
+                if (dir == nullptr) {
+                    std::cerr << "Cannot open certificate directory: " << cert_dir << "\n";
+                    cleanup_ssl(ctx);
+                    return EXIT_FAILURE;
+                }
+                struct dirent* entry;
+                bool has_certificates = false;
+                while ((entry = readdir(dir)) != nullptr) {
+                    std::string filename = entry->d_name;
+                    if (filename == "." || filename == "..") continue;
+                    // Check the file extension for .pem or .crt
+                    if (filename.length() >= 4 &&
+                        (filename.substr(filename.length() - 4) == ".pem" ||
+                        filename.substr(filename.length() - 4) == ".crt")) {
+                        has_certificates = true;
+                        break;
+                    }
+                }
+                closedir(dir);
+                if (!has_certificates) {
+                    std::cerr << "Certificate directory is empty or contains no valid certificates\n";
+                    cleanup_ssl(ctx);
+                    return EXIT_FAILURE;
+                }
             }
-        } else {
-            // Use default system certificates
-            if (SSL_CTX_set_default_verify_paths(ctx) != 1) {
-                std::cerr << "Error setting default verify paths\n";
+
+            // Load certificates from the specified file or directory
+            if (SSL_CTX_load_verify_locations(ctx, cert_file.empty() ? nullptr : cert_file.c_str(),
+                                            cert_dir.empty() ? nullptr : cert_dir.c_str()) <= 0) {
+                std::cerr << "Error loading certificates\n";
+                ERR_print_errors_fp(stderr);
                 cleanup_ssl(ctx);
                 return EXIT_FAILURE;
             }
@@ -108,6 +141,8 @@ int main(int argc, char* argv[]) {
         // Set the server certificate validation mode
         SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
     }
+
+
 
     Connection conn = connect_to_server(server_ip, port, ctx, use_tls);
 
