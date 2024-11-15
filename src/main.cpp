@@ -4,9 +4,9 @@
 #include <vector>
 #include <sstream> 
 #include <unistd.h>
+#include <dirent.h>
 #include "imap_client.h"
 #include "ssl_utils.h"
-#include <dirent.h>
 
 int main(int argc, char* argv[]) {
     std::string server_ip;
@@ -26,7 +26,12 @@ int main(int argc, char* argv[]) {
     while ((opt = getopt(argc, argv, "p:TC:c:a:b:o:nh")) != -1) {
         switch (opt) {
             case 'p':
-                port = std::stoi(optarg);
+                try {
+                    port = std::stoi(optarg);
+                } catch (const std::invalid_argument& e) {
+                    std::cerr << "Error: port must contain only numbers.\n";
+                    return EXIT_FAILURE;
+                }
                 break;
             case 'T':
                 use_tls = true;
@@ -131,8 +136,7 @@ int main(int argc, char* argv[]) {
             // Load certificates from the specified file or directory
             if (SSL_CTX_load_verify_locations(ctx, cert_file.empty() ? nullptr : cert_file.c_str(),
                                             cert_dir.empty() ? nullptr : cert_dir.c_str()) <= 0) {
-                std::cerr << "Error loading certificates\n";
-                ERR_print_errors_fp(stderr);
+                std::cerr << "Error loading certificate\n";
                 cleanup_ssl(ctx);
                 return EXIT_FAILURE;
             }

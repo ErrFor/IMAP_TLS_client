@@ -73,7 +73,6 @@ Connection connect_to_server(const std::string& server, int port, SSL_CTX* ctx, 
 
         if (SSL_connect(ssl) <= 0) {
             std::cerr << "SSL connection failed" << std::endl;
-            ERR_print_errors_fp(stderr);
             SSL_free(ssl);
             close(sockfd);
             exit(EXIT_FAILURE);
@@ -88,6 +87,8 @@ Connection connect_to_server(const std::string& server, int port, SSL_CTX* ctx, 
             cleanup_ssl(ctx);
             exit(EXIT_FAILURE);
         }
+
+        std::cout << "TSL connection established\n";
     }
 
     return {sockfd, ssl, use_tls};

@@ -12,7 +12,6 @@ SSL_CTX* create_context() {
     SSL_CTX* ctx = SSL_CTX_new(method);
     if (!ctx) {
         std::cerr << "Unable to create SSL context" << std::endl;
-        ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);
     }
     return ctx;
