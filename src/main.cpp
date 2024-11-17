@@ -1,7 +1,7 @@
 /**
  * @file main.cpp
  * 
- * @brief Main program file.
+ * @brief Main program file for the IMAP client application.
  * @author Slabik Yaroslav xslabi01
  */
 
@@ -10,9 +10,12 @@
 #include <vector>
 #include <sstream> 
 #include <unistd.h>
-#include <dirent.h>
 #include "imap_client.h"
 #include "ssl_utils.h"
+
+void usage_print(const char* prog_name) {
+    std::cerr << "Usage: " << prog_name << " server [-p port] [-T [-c certfile] [-C certaddr]] [-n] [-h] -a auth_file [-b MAILBOX] -o out_dir\n";
+}
 
 int main(int argc, char* argv[]) {
     std::string server_ip;
@@ -27,9 +30,11 @@ int main(int argc, char* argv[]) {
     std::string out_dir;
     bool only_headers = false;
     bool only_new = false;
+    SSL_CTX* ctx = nullptr;
 
     std::string username, password;
 
+    // Parse command-line arguments
     int opt;
     while ((opt = getopt(argc, argv, "p:TC:c:a:b:o:nh")) != -1) {
         switch (opt) {
@@ -69,7 +74,7 @@ int main(int argc, char* argv[]) {
                 only_headers = true;
                 break;
             default:
-                std::cerr << "Usage: " << argv[0] << " server [-p port] [-T [-c certfile] [-C certaddr]] [-n] [-h] -a auth_file [-b MAILBOX] -o out_dir\n";
+                usage_print(argv[0]);
                 return EXIT_FAILURE;
         }
     }
@@ -77,41 +82,37 @@ int main(int argc, char* argv[]) {
     // Check if server IP is provided
     if (optind >= argc) {
         std::cerr << "Error: server IP or domain name is required\n";
+        usage_print(argv[0]);
         return EXIT_FAILURE;
     }
     server_ip = argv[optind];
 
-    optind++;
-
     // Checking for additional non-option arguments
-    if (optind < argc) {
+    if (++optind < argc) {
         std::cerr << "Error: unexpected argument(s): ";
         while (optind < argc) {
-            std::cerr << argv[optind++] << " ";
+            std::cerr << argv[optind++] << " \n";
         }
-        std::cerr << "\nUsage: " << argv[0] << " server [-p port] [-T [-c certfile] [-C certaddr]] [-n] [-h] -a auth_file [-b MAILBOX] -o out_dir\n";
+        usage_print(argv[0]);
         return EXIT_FAILURE;
     }
 
     // Check dependencies between options
     if ((cert_file_set || cert_dir_set) && !use_tls) {
         std::cerr << "Error: -C and -c options require -T to be specified.\n";
-        std::cerr << "Usage: " << argv[0] << " server [-p port] [-T [-c certfile] [-C certaddr]] [-n] [-h] -a auth_file [-b MAILBOX] -o out_dir\n";
+        usage_print(argv[0]);
         return EXIT_FAILURE;
     }
 
-    initialize_ssl();
-    SSL_CTX* ctx = create_context();
-
     if (credentials_file.empty()) {
         std::cerr << "Error: credentials file is required (-a auth_file)\n";
-        std::cerr << "Usage: " << argv[0] << " server [-p port] [-T [-c certfile] [-C certaddr]] [-n] [-h] -a auth_file [-b MAILBOX] -o out_dir\n";
+        usage_print(argv[0]);
         return EXIT_FAILURE;
     }
 
     if (out_dir.empty()) {
         std::cerr << "Error: output directory is required (-o out_dir)\n";
-        std::cerr << "Usage: " << argv[0] << " server [-p port] [-T [-c certfile] [-C certaddr]] [-n] [-h] -a auth_file [-b MAILBOX] -o out_dir\n";
+        usage_print(argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -126,63 +127,17 @@ int main(int argc, char* argv[]) {
     }
 
     if (use_tls) {
-        // Use default system certificates
-        if (SSL_CTX_set_default_verify_paths(ctx) != 1) {
-            std::cerr << "Error setting default verify paths\n";
-            cleanup_ssl(ctx);
+        initialize_ssl();
+        ctx = create_context();
+
+        if (!configure_ssl_context(ctx, cert_file, cert_dir)) {
             return EXIT_FAILURE;
         }
-
-        // If user certificates are specified, download them additionally
-        if (!cert_file.empty() || !cert_dir.empty()) {
-            // Check that the certificate directory is not empty and contains certificates
-            if (!cert_dir.empty()) {
-                DIR* dir = opendir(cert_dir.c_str());
-                if (dir == nullptr) {
-                    std::cerr << "Cannot open certificate directory: " << cert_dir << "\n";
-                    cleanup_ssl(ctx);
-                    return EXIT_FAILURE;
-                }
-                struct dirent* entry;
-                bool has_certificates = false;
-                while ((entry = readdir(dir)) != nullptr) {
-                    std::string filename = entry->d_name;
-                    if (filename == "." || filename == "..") continue;
-                    // Check the file extension for .pem or .crt
-                    if (filename.length() >= 4 &&
-                        (filename.substr(filename.length() - 4) == ".pem" ||
-                        filename.substr(filename.length() - 4) == ".crt")) {
-                        has_certificates = true;
-                        break;
-                    }
-                }
-                closedir(dir);
-                if (!has_certificates) {
-                    std::cerr << "Certificate directory is empty or contains no valid certificates\n";
-                    cleanup_ssl(ctx);
-                    return EXIT_FAILURE;
-                }
-            }
-
-            // Load certificates from the specified file or directory
-            if (SSL_CTX_load_verify_locations(ctx, cert_file.empty() ? nullptr : cert_file.c_str(),
-                                            cert_dir.empty() ? nullptr : cert_dir.c_str()) <= 0) {
-                std::cerr << "Error loading certificate\n";
-                cleanup_ssl(ctx);
-                return EXIT_FAILURE;
-            }
-        }
-
-        // Set the server certificate validation mode
-        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
     }
-
-
 
     Connection conn = connect_to_server(server_ip, port, ctx, use_tls);
 
     if (!login(conn, username, password)) {
-        std::cerr << "Authentication failed" << std::endl;
         if (conn.use_tls) {
             SSL_shutdown(conn.ssl);
             SSL_free(conn.ssl);
@@ -192,9 +147,10 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    int message_count = 0;
-    if (!select_mailbox(conn, mailbox, message_count)) {
-        std::cerr << "Failed to select mailbox" << std::endl;
+    // Select mailbox and get list of UIDs
+    std::vector<int> server_uids;
+
+    if (!select_mailbox(conn, mailbox, server_uids)) {
         if (conn.use_tls) {
             SSL_shutdown(conn.ssl);
             SSL_free(conn.ssl);
@@ -204,45 +160,21 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    std::vector<int> message_numbers;
+    std::vector<int> messages_numbers;
 
     if (only_new) {
-        // Search for unseen messages
-        std::string search_command = "a003 SEARCH UNSEEN\r\n";
-        std::string search_response;
-
-        if (!send_command(conn, search_command, search_response)) {
-            std::cerr << "Failed to search for unseen messages" << std::endl;
+        if (!search_unseen_messages(conn, messages_numbers)) {
+            // Clean up and exit
             if (conn.use_tls) {
                 SSL_shutdown(conn.ssl);
                 SSL_free(conn.ssl);
             }
             close(conn.sockfd);
-            cleanup_ssl(ctx);
+            if (ctx) cleanup_ssl(ctx);
             return EXIT_FAILURE;
         }
 
-        // Parse SEARCH response
-        std::istringstream response_stream(search_response);
-        std::string line;
-        while (std::getline(response_stream, line)) {
-            if (line.find("* SEARCH") != std::string::npos) {
-                std::istringstream line_stream(line);
-                std::string token;
-                line_stream >> token; // Skip "*"
-                line_stream >> token; // Skip "SEARCH"
-
-                while (line_stream >> token) {
-                    int msg_num = std::stoi(token);
-                    message_numbers.push_back(msg_num);
-                }
-            } else if (line.find("OK") != std::string::npos) {
-                // End of response
-                break;
-            }
-        }
-
-        if (message_numbers.empty()) {
+        if (messages_numbers.empty()) {
             std::cout << "Žádné nové zprávy ve schránce " << mailbox << "." << std::endl;
             // Close connection and exit
             if (conn.use_tls) {
@@ -250,17 +182,15 @@ int main(int argc, char* argv[]) {
                 SSL_free(conn.ssl);
             }
             close(conn.sockfd);
-            cleanup_ssl(ctx);
-            return 0;
+            if (ctx) cleanup_ssl(ctx);
+            return EXIT_SUCCESS;
         }
     } else {
-        // Get all message numbers
-        for (int i = 1; i <= message_count; ++i) {
-            message_numbers.push_back(i);
-        }
+        // Get all message numbers (UIDs from the server)
+        messages_numbers = server_uids;
     }
-
-    if (!fetch_messages(conn, message_numbers, only_headers, out_dir, mailbox, only_new)) {
+    
+    if (!fetch_messages(conn, server_uids, only_headers, out_dir, mailbox, only_new)) {
         if (conn.use_tls) {
             SSL_shutdown(conn.ssl);
             SSL_free(conn.ssl);

@@ -94,7 +94,7 @@ Connection connect_to_server(const std::string& server, int port, SSL_CTX* ctx, 
             exit(EXIT_FAILURE);
         }
 
-        std::cout << "TSL connection established\n";
+        std::cout << "TSL connection established. ";
     }
 
     return {sockfd, ssl, use_tls};
@@ -108,63 +108,60 @@ bool send_command(Connection& conn, const std::string& command, std::string& res
         return false;
     }
 
-    char buffer[4096] = {0};
-    int bytes_received = ssl_read(conn, buffer, sizeof(buffer) - 1);
-
-    if (bytes_received > 0) {
-        buffer[bytes_received] = '\0';
-        response = std::string(buffer);
-        return response.find("OK") != std::string::npos;
-    } else {
-        std::cerr << "No response from server" << std::endl;
-        return false;
-    }
-}
-
-bool receive_response(Connection& conn, std::string& response) {
-    char buffer[4096];
     response.clear();
+    std::string line;
+    std::string tag = command.substr(0, command.find(' '));
 
     while (true) {
-        int bytes_received = ssl_read(conn, buffer, sizeof(buffer) - 1);
-
-        if (bytes_received < 0) {
-            std::cerr << "Error reading from socket" << std::endl;
+        if (!read_line(conn, line)) {
+            std::cerr << "No response from server" << std::endl;
             return false;
-        } else if (bytes_received == 0) {
-            // Connection closed
-            break;
         }
+        response += line;
 
-        buffer[bytes_received] = '\0';
-        response += buffer;
-
-        // Check if response ends with CRLF
-        if (response.find("\r\n") != std::string::npos) {
-            break;
+        if (line.find(tag + " OK") != std::string::npos) {
+            break; // Command completed successfully
+        } else if (line.find(tag + " NO") != std::string::npos || line.find(tag + " BAD") != std::string::npos) {
+            std::cerr << "Server error: " << line;
+            return false; // Command failed
         }
     }
 
     return true;
 }
 
-std::string base64_encode(const std::string& input) {
-    BIO* bio, *b64;
-    BUF_MEM* buffer_ptr;
+bool read_line(Connection& conn, std::string& line) {
+    line.clear();
+    char c;
+    while (true) {
+        int n = ssl_read(conn, &c, 1);
 
-    b64 = BIO_new(BIO_f_base64());
-    bio = BIO_new(BIO_s_mem());
-    bio = BIO_push(b64, bio);
-    BIO_set_flags(bio, BIO_FLAGS_BASE64_NO_NL);
+        if (n <= 0) {
+            return false; // Error or connection closed
+        }
+        line += c;
+        if (line.size() >= 2 && line.substr(line.size() - 2) == "\r\n") {
+            break; // End of line
+        }
+    }
+    return true;
+}
 
-    BIO_write(bio, input.data(), input.size());
-    BIO_flush(bio);
-    BIO_get_mem_ptr(bio, &buffer_ptr);
+bool read_literal(Connection& conn, int size, std::string& data) {
+    data.clear();
+    char buffer[1024];
+    int remaining = size;
+    while (remaining > 0) {
+        int to_read = std::min(remaining, (int)sizeof(buffer));
+        int n = ssl_read(conn, buffer, to_read);
 
-    std::string output(buffer_ptr->data, buffer_ptr->length);
-    BIO_free_all(bio);
-
-    return output;
+        if (n <= 0) {
+            return false; // Error or connection closed
+        }
+        data.append(buffer, n);
+        remaining -= n;
+    }
+    return true;
 }
 
 std::string base64_decode(const std::string& encoded_data) {
@@ -256,14 +253,14 @@ bool login(Connection& conn, const std::string& username, const std::string& pas
     std::string response;
 
     // Receive server's greeting
-    if (!receive_response(conn, response)) {
+    if (!read_line(conn, response)) {
+        std::cerr << "Error receiving server greeting" << std::endl;
         return false;
     }
 
     // Send LOGIN command
     std::string login_cmd = "a001 LOGIN " + username + " " + password + "\r\n";
     if (!send_command(conn, login_cmd, response)) {
-        std::cerr << "Login failed" << std::endl;
         return false;
     }
 
@@ -271,32 +268,111 @@ bool login(Connection& conn, const std::string& username, const std::string& pas
     if (response.find("OK") != std::string::npos) {
         return true;
     } else {
-        std::cerr << "Login failed: " << response << std::endl;
         return false;
     }
 }
 
-bool select_mailbox(Connection& conn, const std::string& mailbox, int& message_count) {
+bool select_mailbox(Connection& conn, const std::string& mailbox, std::vector<int>& server_uids) {
     std::string select_cmd = "a002 SELECT " + mailbox + "\r\n";
     std::string response;
     if (!send_command(conn, select_cmd, response)) {
         return false;
     }
 
-    // Initialize message count
-    message_count = 0;
+    // Initialize UID list
+    server_uids.clear();
 
-    // Parse response to find the number of messages
-    std::istringstream response_stream(response);
+    // Do a UID SEARCH to get the list of UIDs
+    std::string uid_search_cmd = "a003 UID SEARCH ALL\r\n";
+    std::string uid_search_response;
+    if (!send_command(conn, uid_search_cmd, uid_search_response)) {
+        return false;
+    }
+
+    // Parse the response to get the list of UIDs
+    std::istringstream response_stream(uid_search_response);
     std::string line;
     while (std::getline(response_stream, line)) {
-        if (line.find("* ") == 0 && line.find("EXISTS") != std::string::npos) {
+        if (line.find("* SEARCH") != std::string::npos) {
             std::istringstream line_stream(line);
-            std::string asterisk, num_str, exists;
-            line_stream >> asterisk >> num_str >> exists;
-            if (exists == "EXISTS") {
-                message_count = std::stoi(num_str);
+            std::string token;
+            line_stream >> token; // Skip "*"
+            line_stream >> token; // Skip "SEARCH"
+
+            while (line_stream >> token) {
+                int uid = std::stoi(token);
+                server_uids.push_back(uid);
             }
+        } else if (line.find("OK") != std::string::npos) {
+            // End of response
+            break;
+        }
+    }
+
+    return true;
+}
+
+std::set<int> read_local_index(const std::string& out_dir) {
+    std::set<int> local_uids;
+    std::string index_file = out_dir + "/index.txt";
+    std::ifstream index_in(index_file);
+    if (!index_in.is_open()) {
+        // Index file does not exist yet
+        return local_uids;
+    }
+
+    int uid;
+    while (index_in >> uid) {
+        local_uids.insert(uid);
+    }
+
+    index_in.close();
+    return local_uids;
+}
+
+void update_local_index(const std::string& out_dir, const std::set<int>& local_uids) {
+    std::string index_file = out_dir + "/index.txt";
+
+    // Write the updated index
+    std::ofstream index_out(index_file);
+    if (!index_out.is_open()) {
+        std::cerr << "Failed to open index file: " << index_file << std::endl;
+        return;
+    }
+
+    for (int uid : local_uids) {
+        index_out << uid << std::endl;
+    }
+
+    index_out.close();
+}
+
+bool search_unseen_messages(Connection& conn, std::vector<int>& messages_numbers) {
+    std::string search_command = "a003 SEARCH UNSEEN\r\n";
+    std::string search_response;
+
+    if (!send_command(conn, search_command, search_response)) {
+        std::cerr << "Failed to search for unseen messages" << std::endl;
+        return false;
+    }
+
+    // Parse SEARCH response
+    std::istringstream response_stream(search_response);
+    std::string line;
+    while (std::getline(response_stream, line)) {
+        if (line.find("* SEARCH") != std::string::npos) {
+            std::istringstream line_stream(line);
+            std::string token;
+            line_stream >> token; // Skip "*"
+            line_stream >> token; // Skip "SEARCH"
+
+            while (line_stream >> token) {
+                int msg_num = std::stoi(token);
+                messages_numbers.push_back(msg_num);
+            }
+        } else if (line.find("OK") != std::string::npos) {
+            // End of response
+            break;
         }
     }
 
@@ -414,49 +490,50 @@ bool save_message(const std::string& message, const std::string& out_dir, int me
     return true;
 }
 
-bool read_line(Connection& conn, std::string& line) {
-    line.clear();
-    char c;
-    while (true) {
-        int n = ssl_read(conn, &c, 1);
-
-        if (n <= 0) {
-            return false; // Error or connection closed
-        }
-        line += c;
-        if (line.size() >= 2 && line.substr(line.size() - 2) == "\r\n") {
-            break; // End of line
-        }
-    }
-    return true;
-}
-
-bool read_literal(Connection& conn, int size, std::string& data) {
-    data.clear();
-    char buffer[1024];
-    int remaining = size;
-    while (remaining > 0) {
-        int to_read = std::min(remaining, (int)sizeof(buffer));
-        int n = ssl_read(conn, buffer, to_read);
-
-        if (n <= 0) {
-            return false; // Error or connection closed
-        }
-        data.append(buffer, n);
-        remaining -= n;
-    }
-    return true;
-}
-
-bool fetch_messages(Connection& conn, const std::vector<int>& message_numbers, bool only_headers, const std::string& out_dir, const std::string& mailbox, bool only_new) {
+bool fetch_messages(Connection& conn, const std::vector<int>& message_uids, bool only_headers,
+                    const std::string& out_dir, const std::string& mailbox, bool only_new) {
     int messages_fetched = 0;
 
-    for (int msg_num : message_numbers) {
+    if (message_uids.empty()) {return true;}    // No messages to fetch
+
+    // Read local UIDs
+    std::set<int> local_uids = read_local_index(out_dir);
+
+    // Determine new messages to download
+    std::vector<int> uids_to_download;
+    if (!only_new) {
+        // When only headers are requested, fetch headers for all messages
+        uids_to_download = message_uids;
+    } else {
+        // Determine new messages to download
+        for (int uid : message_uids) {
+            if (local_uids.find(uid) == local_uids.end()) {
+                uids_to_download.push_back(uid);
+            }
+        }
+    }
+
+    // Determine messages to delete locally
+    std::vector<int> uids_to_delete;
+    for (int uid : local_uids) {
+        if (std::find(message_uids.begin(), message_uids.end(), uid) == message_uids.end()) {
+            uids_to_delete.push_back(uid);
+        }
+    }
+
+    // Delete local messages that have been removed from the server
+    for (int uid : uids_to_delete) {
+        std::string file_path = out_dir + "/message_" + std::to_string(uid) + ".txt";
+        remove(file_path.c_str());
+        local_uids.erase(uid);
+    }
+
+    for (int uid : uids_to_download) {
         std::string fetch_command;
         if (only_headers) {
-            fetch_command = "a003 FETCH " + std::to_string(msg_num) + " (BODY.PEEK[HEADER])\r\n";
+            fetch_command = "a003 UID FETCH " + std::to_string(uid) + " (BODY.PEEK[HEADER])\r\n";
         } else {
-            fetch_command = "a003 FETCH " + std::to_string(msg_num) + " (RFC822)\r\n";
+            fetch_command = "a003 UID FETCH " + std::to_string(uid) + " (RFC822)\r\n";
         }
 
         // Send the FETCH command
@@ -504,11 +581,12 @@ bool fetch_messages(Connection& conn, const std::vector<int>& message_numbers, b
                             }
 
                             // Save the message
-                            if (!save_message(literal_data, out_dir, msg_num)) {
-                                std::cerr << "Failed to save message number: " << msg_num << std::endl;
+                            if (!save_message(literal_data, out_dir, uid)) {
+                                std::cerr << "Failed to save message number: " << uid << std::endl;
                                 return false;
                             }
 
+                            local_uids.insert(uid);
                             messages_fetched++;
                         }
                     }
@@ -522,15 +600,33 @@ bool fetch_messages(Connection& conn, const std::vector<int>& message_numbers, b
         return false;
     }
 
+    update_local_index(out_dir, local_uids);
+
     // Output information about the number of downloaded messages
     if (only_headers && only_new) {
-        std::cout << "Staženy hlavičky " << messages_fetched << " nových zpráv ze schránky " << mailbox << "." << std::endl;
+        if (messages_fetched == 1) {
+            std::cout << "Stažena hlavička 1 nové zprávy ze schránky " << mailbox << "." << std::endl;
+        } else {
+            std::cout << "Staženy hlavičky " << messages_fetched << " nových zpráv ze schránky " << mailbox << "." << std::endl;
+        }
     } else if (only_headers) {
+        if (messages_fetched == 1) {
+            std::cout << "Stažena hlavička 1 zprávy ze schránky " << mailbox << "." << std::endl;
+        } else {
         std::cout << "Staženy hlavičky " << messages_fetched << " zpráv ze schránky " << mailbox << "." << std::endl;
+        }
     } else if (only_new) {
-        std::cout << "Staženo " << messages_fetched << " nových zpráv ze schránky " << mailbox << "." << std::endl;
+        if (messages_fetched == 1) {
+            std::cout << "Stažena 1 nová zpráva ze schránky " << mailbox << "." << std::endl;
+        } else {
+            std::cout << "Staženo " << messages_fetched << " nových zpráv ze schránky " << mailbox << "." << std::endl;
+        }
     } else {
-        std::cout << "Staženo " << messages_fetched << " zpráv ze schránky " << mailbox << "." << std::endl;
+        if (messages_fetched == 1) {
+            std::cout << "Stažena 1 zpráva ze schránky " << mailbox << "." << std::endl;
+        } else {
+            std::cout << "Staženo " << messages_fetched << " zpráv ze schránky " << mailbox << "." << std::endl;
+        }
     }
 
     return true;

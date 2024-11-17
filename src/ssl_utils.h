@@ -10,6 +10,7 @@
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <string>
 
 /**
  * Initializes the OpenSSL library.
@@ -27,5 +28,14 @@ SSL_CTX* create_context();
  * @param ctx - Pointer to SSL context to be cleaned.
  */
 void cleanup_ssl(SSL_CTX* ctx);
+
+/**
+ * Configures the SSL context with certificates and verification options.
+ * @param ctx - SSL context to configure.
+ * @param cert_file - Path to the certificate file (optional).
+ * @param cert_dir - Path to the certificate directory (optional).
+ * @return bool - True if configuration is successful, false otherwise.
+ */
+bool configure_ssl_context(SSL_CTX* ctx, const std::string& cert_file, const std::string& cert_dir);
 
 #endif // SSL_UTILS_H

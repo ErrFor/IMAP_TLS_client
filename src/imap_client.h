@@ -11,6 +11,7 @@
 #include <string>
 #include <openssl/ssl.h>
 #include <vector>
+#include <set>
 
 /**
  * Struct representing a connection to the server.
@@ -61,19 +62,22 @@ Connection connect_to_server(const std::string& server, int port, SSL_CTX* ctx, 
 bool send_command(Connection& conn, const std::string& command, std::string& response);
 
 /**
- * Receives a response from the IMAP server.
+ * Reads a line from the server.
+ * Reads character by character until the end of a line (\r\n) is reached.
  * @param conn - Connection object containing server connection details.
- * @param response - String to store the server's response.
- * @return bool - True if response received successfully.
+ * @param line - String to store the line read from the server.
+ * @return bool - True if line read successfully, false if error or connection closed.
  */
-bool receive_response(Connection& conn, std::string& response);
+bool read_line(Connection& conn, std::string& line);
 
 /**
- * Encodes a string using Base64 encoding.
- * @param input - The string to be encoded.
- * @return std::string - The Base64 encoded string.
+ * Reads a literal data block of a given size from the server.
+ * @param conn - Connection object containing server connection details.
+ * @param size - The size of the literal data to be read.
+ * @param data - String to store the literal data read from the server.
+ * @return bool - True if data read successfully, false if error or connection closed.
  */
-std::string base64_encode(const std::string& input);
+bool read_literal(Connection& conn, int size, std::string& data);
 
 /**
  * Decodes a Base64 encoded string.
@@ -110,10 +114,31 @@ bool login(Connection& conn, const std::string& username, const std::string& pas
  * Selects the specified mailbox on the IMAP server.
  * @param conn - Connection object containing server connection details.
  * @param mailbox - Mailbox to select (by default "INBOX").
- * @param message_count - Reference to store the count of messages in the mailbox.
+ * @param server_uids - Vector to store the server's unique IDs for messages.
  * @return bool - True if mailbox is successfully selected.
  */
-bool select_mailbox(Connection& conn, const std::string& mailbox, int& message_count);
+bool select_mailbox(Connection& conn, const std::string& mailbox, std::vector<int>& server_uids);
+
+/**
+ * Reads the local index of UIDs from a file.
+ * @param out_dir - The directory containing the index file.
+ */
+std::set<int> read_local_index(const std::string& out_dir);
+
+/**
+ * Updates the local index file with the current set of UIDs.
+ * @param out_dir - The directory containing the index file.
+ * @param local_uids - The set of local UIDs to be written to the index file.
+ */
+void update_local_index(const std::string& out_dir, const std::string& mailbox, const std::set<int>& local_uids);
+
+/**
+ * Searches for unseen messages in the selected mailbox.
+ * @param conn - Connection object containing server connection details.
+ * @param messages_numbers - Vector to store the message numbers of unseen messages.
+ * @return bool - True if search was successful, false otherwise.
+ */
+bool search_unseen_messages(Connection& conn, std::vector<int>& messages_numbers);
 
 /**
  * Saves the message to the specified output directory.
@@ -127,35 +152,17 @@ bool select_mailbox(Connection& conn, const std::string& mailbox, int& message_c
 bool save_message(const std::string& message, const std::string& out_dir, int message_number);
 
 /**
- * Reads a line from the server.
- * Reads character by character until the end of a line (\r\n) is reached.
- * @param conn - Connection object containing server connection details.
- * @param line - String to store the line read from the server.
- * @return bool - True if line read successfully, false if error or connection closed.
- */
-bool read_line(Connection& conn, std::string& line);
-
-/**
- * Reads a literal data block of a given size from the server.
- * @param conn - Connection object containing server connection details.
- * @param size - The size of the literal data to be read.
- * @param data - String to store the literal data read from the server.
- * @return bool - True if data read successfully, false if error or connection closed.
- */
-bool read_literal(Connection& conn, int size, std::string& data);
-
-/**
- * Fetches messages from the server based on message numbers.
+ * Fetches messages from the server based on the provided message UIDs.
  * Handles both fetching headers only or full message content.
  * @param conn - Connection object containing server connection details.
- * @param message_numbers - Vector containing message numbers to be fetched.
+ * @param message_numbers - Vector of message unique IDs to fetch.
  * @param only_headers - Boolean flag indicating whether to fetch only headers.
  * @param out_dir - Output directory to save the fetched messages.
  * @param mailbox - Mailbox name from which messages are being fetched.
  * @param only_new - Boolean flag indicating if only new messages are being fetched.
  * @return bool - True if messages fetched successfully, false otherwise.
  */
-bool fetch_messages(Connection& conn, const std::vector<int>& message_numbers, bool only_headers,
+bool fetch_messages(Connection& conn, const std::vector<int>& message_uids, bool only_headers,
                     const std::string& out_dir, const std::string& mailbox, bool only_new);
 
 /**
