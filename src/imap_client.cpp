@@ -20,6 +20,15 @@
 #include <vector>
 #include <algorithm>
 #include <cctype>
+#include <atomic>
+#include <iomanip>
+
+std::string generate_tag() {
+    static std::atomic<int> tag_counter(1);
+    std::ostringstream tag_stream;
+    tag_stream << "a" << std::setw(3) << std::setfill('0') << tag_counter++;
+    return tag_stream.str();
+}
 
 int ssl_read(Connection& conn, void* buf, int num) {
     if (conn.use_tls) {
@@ -94,13 +103,12 @@ Connection connect_to_server(const std::string& server, int port, SSL_CTX* ctx, 
             exit(EXIT_FAILURE);
         }
 
-        std::cout << "TSL connection established. ";
     }
 
     return {sockfd, ssl, use_tls};
 }
 
-bool send_command(Connection& conn, const std::string& command, std::string& response) {
+bool send_command(Connection& conn, const std::string& command, std::string& response, const std::string& expected_tag) {
     int bytes_sent = ssl_write(conn, command.c_str(), command.length());
 
     if (bytes_sent <= 0) {
@@ -110,7 +118,6 @@ bool send_command(Connection& conn, const std::string& command, std::string& res
 
     response.clear();
     std::string line;
-    std::string tag = command.substr(0, command.find(' '));
 
     while (true) {
         if (!read_line(conn, line)) {
@@ -119,9 +126,9 @@ bool send_command(Connection& conn, const std::string& command, std::string& res
         }
         response += line;
 
-        if (line.find(tag + " OK") != std::string::npos) {
+        if (line.find(expected_tag + " OK") != std::string::npos) {
             break; // Command completed successfully
-        } else if (line.find(tag + " NO") != std::string::npos || line.find(tag + " BAD") != std::string::npos) {
+        } else if (line.find(expected_tag + " NO") != std::string::npos || line.find(expected_tag + " BAD") != std::string::npos) {
             std::cerr << "Server error: " << line;
             return false; // Command failed
         }
@@ -258,14 +265,17 @@ bool login(Connection& conn, const std::string& username, const std::string& pas
         return false;
     }
 
+     // Generate unique tag
+    std::string tag = generate_tag();
+
     // Send LOGIN command
-    std::string login_cmd = "a001 LOGIN " + username + " " + password + "\r\n";
-    if (!send_command(conn, login_cmd, response)) {
+    std::string login_cmd = tag + " LOGIN " + username + " " + password + "\r\n";
+    if (!send_command(conn, login_cmd, response, tag)) {
         return false;
     }
 
     // Check if login was successful
-    if (response.find("OK") != std::string::npos) {
+    if (response.find(tag + " OK") != std::string::npos) {
         return true;
     } else {
         return false;
@@ -273,19 +283,20 @@ bool login(Connection& conn, const std::string& username, const std::string& pas
 }
 
 bool select_mailbox(Connection& conn, const std::string& mailbox, std::vector<int>& server_uids) {
-    std::string select_cmd = "a002 SELECT " + mailbox + "\r\n";
+    std::string tag_select = generate_tag();
+    std::string select_cmd = tag_select + " SELECT " + mailbox + "\r\n";
     std::string response;
-    if (!send_command(conn, select_cmd, response)) {
+    if (!send_command(conn, select_cmd, response, tag_select)) {
         return false;
     }
 
     // Initialize UID list
     server_uids.clear();
 
-    // Do a UID SEARCH to get the list of UIDs
-    std::string uid_search_cmd = "a003 UID SEARCH ALL\r\n";
+    std::string tag_search = generate_tag();
+    std::string uid_search_cmd = tag_search + " UID SEARCH ALL\r\n";
     std::string uid_search_response;
-    if (!send_command(conn, uid_search_cmd, uid_search_response)) {
+    if (!send_command(conn, uid_search_cmd, uid_search_response, tag_search)) {
         return false;
     }
 
@@ -303,7 +314,7 @@ bool select_mailbox(Connection& conn, const std::string& mailbox, std::vector<in
                 int uid = std::stoi(token);
                 server_uids.push_back(uid);
             }
-        } else if (line.find("OK") != std::string::npos) {
+        } else if (line.find(tag_search + " OK") != std::string::npos) {
             // End of response
             break;
         }
@@ -348,10 +359,11 @@ void update_local_index(const std::string& out_dir, const std::set<int>& local_u
 }
 
 bool search_unseen_messages(Connection& conn, std::vector<int>& messages_numbers) {
-    std::string search_command = "a003 SEARCH UNSEEN\r\n";
+    std::string tag = generate_tag();
+    std::string search_command = tag + " SEARCH UNSEEN\r\n";
     std::string search_response;
 
-    if (!send_command(conn, search_command, search_response)) {
+    if (!send_command(conn, search_command, search_response, tag)) {
         std::cerr << "Failed to search for unseen messages" << std::endl;
         return false;
     }
@@ -370,7 +382,7 @@ bool search_unseen_messages(Connection& conn, std::vector<int>& messages_numbers
                 int msg_num = std::stoi(token);
                 messages_numbers.push_back(msg_num);
             }
-        } else if (line.find("OK") != std::string::npos) {
+        } else if (line.find(tag + " OK") != std::string::npos) {
             // End of response
             break;
         }
@@ -529,11 +541,12 @@ bool fetch_messages(Connection& conn, const std::vector<int>& message_uids, bool
     }
 
     for (int uid : uids_to_download) {
+        std::string tag_fetch = generate_tag();
         std::string fetch_command;
         if (only_headers) {
-            fetch_command = "a003 UID FETCH " + std::to_string(uid) + " (BODY.PEEK[HEADER])\r\n";
+            fetch_command = tag_fetch + " UID FETCH " + std::to_string(uid) + " (BODY.PEEK[HEADER])\r\n";
         } else {
-            fetch_command = "a003 UID FETCH " + std::to_string(uid) + " (RFC822)\r\n";
+            fetch_command = tag_fetch + " UID FETCH " + std::to_string(uid) + " (RFC822)\r\n";
         }
 
         // Send the FETCH command
@@ -553,7 +566,7 @@ bool fetch_messages(Connection& conn, const std::vector<int>& message_uids, bool
             }
 
             // Check for completion of the command
-            if (line.find("OK") != std::string::npos && line[0] == 'a') {
+            if (line.find(tag_fetch + " OK") != std::string::npos && line[0] == 'a') {
                 // End of response
                 break;
             } else if (line[0] == '*') {
@@ -596,8 +609,8 @@ bool fetch_messages(Connection& conn, const std::vector<int>& message_uids, bool
     }
 
     if (messages_fetched == 0) {
-        std::cout << "No messages fetched" << std::endl;
-        return false;
+        std::cout << "Žádné nové zprávy ve schránce " << mailbox << "." << std::endl;
+        return true;
     }
 
     update_local_index(out_dir, local_uids);

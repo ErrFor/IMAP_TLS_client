@@ -196,7 +196,7 @@ int main(int argc, char* argv[]) {
             SSL_free(conn.ssl);
         }
         close(conn.sockfd);
-        cleanup_ssl(ctx);
+        if (ctx) cleanup_ssl(ctx);
         return EXIT_FAILURE;
     }
 
@@ -205,6 +205,6 @@ int main(int argc, char* argv[]) {
         SSL_free(conn.ssl);
     }
     close(conn.sockfd);
-    cleanup_ssl(ctx);
-    return 0;
+    if (ctx) cleanup_ssl(ctx);
+    return EXIT_SUCCESS;
 }

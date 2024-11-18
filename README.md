@@ -1,53 +1,42 @@
 # README
-
-**Author**: *Slabik Yaroslav*  
-**Login**: *xslabi01*  
-**Date Created**: *15.11.2024*
-
 ## Program Description
-
-**imapcl** is a command-line application that allows reading emails using the **IMAP4rev1** protocol (RFC 3501). The program connects to an IMAP server, downloads messages, and saves them to a specified directory, each message in a separate file. It outputs the number of downloaded messages to the standard output.
-
-### Features
-
-- Connects to an IMAP server using either plain or TLS connection (when the `-T` option is specified).
-- Authenticates using the `LOGIN` command with credentials provided from an authentication file.
-- Downloads only new messages when the `-n` option is used.
-- Downloads only message headers when the `-h` option is used.
-- Works with a specified mailbox (using the `-b` option); defaults to `INBOX`.
-- Saves messages in the **Internet Message Format** (RFC 5322).
-
-### Limitations
-
-- Only supports authentication using the `LOGIN` command.
-- Other authentication methods, such as `AUTH=PLAIN`, are not supported.
-
+**imapcl** is an IMAP client implemented in C++. The program allows you to connect to an IMAP server using either an unencrypted connection or a secure SSL/TLS connection. The client supports user authentication, specific mailbox selection 
+(e.g. INBOX, Sent, Trash), downloading complete messages or only their headers. The program also provides decoding of Base64 and Quoted-Printable encoded messages and saving messages in RFC 5322 format to a specified directory.
 ## Usage
-
 ```bash
     imapcl server [-p port] [-T [-c certfile] [-C certaddr]] [-n] [-h] -a auth_file [-b MAILBOX] -o out_dir
 ```
-
-### Example
-
+- `server` is the address of the IMAP server (mandatory),
+- `-p port` specifies the port number on the server,
+- `-T` enables encryption (imaps),
+- `-c` certfile is the certificate file,
+- `-c` certaddr is the directory in which to search for certificates,
+- `-n` only new messages,
+- `-h` only message headers,
+- `-auth_file` is a file with user authentication data (mandatory),
+- `-b` MAILBOX specifies the mailbox from which messages are to be downloaded,
+- `-o out_dir` is the directory where the downloaded messages are to be saved (mandatory)/
+### Examples of execution:
+Download all messages without using TLS:
 ```bash
-    # Download all messages from INBOX
-    ./imapcl eva.fit.vutbr.cz -o maildir -a cred
-
-    # Download only new messages from the "Important" mailbox over TLS
-    ./imapcl 10.10.10.1 -p 993 -T -n -b Important -o maildir -a cred
-
-    # Download only headers of all messages from INBOX
-    ./imapcl eva.fit.vutbr.cz -o maildir -h -a cred
+    ./imapcl eva.fit.vutbr.cz -a auth.txt -o messages
+    Downloaded 15 messages from the INBOX.
 ```
-
-## File List  
-
-- `Makefile` — Build file for compiling the program.
-- `src/main.cpp` — Main program file.
-- `src/imap_client.h` — Header file with declarations for the IMAP client functions.
-- `src/imap_client.cpp` — Implementation of the IMAP client functions.
-- `src/ssl_utils.h` — Header file with declarations for SSL/TLS utilities.
-- `src/ssl_utils.cpp` — Implementation of the SSL/TLS utilities.
-- `manual.pdf` — Program documentation, including description, usage instructions, and test results.
-- `README.md` — This file containing the program description.
+Download new messages with TLS and the specified certificate:
+```bash
+    ./imapcl eva.fit.vutbr.cz -T -c cert.pem -n -a auth.txt -o messages
+    TSL connection established. Downloaded 2 new messages from INBOX.
+```
+Downloaded message headers only:
+```bash
+    ./imapcl eva.fit.vutbr.cz -h -a auth.txt -o headers
+    Downloaded 6 message headers from INBOX.
+```
+## List of files  
+- `src/`
+    - `main.cpp` - The main program file that handles command line arguments and coordinates the running of the application.
+    - `imap_client.cpp/imap_client.h` - Implementation of functions for IMAP server communication, message processing and decoding.
+    - `ssl_utils.cpp/ssl_utils.h` - Implementation of functions for working with SSL/TLS connections and certificates.
+- `Makefile` - Build file for compiling the program.
+- `manual.pdf` - Program documentation, including description, usage instructions, and test results.
+- `README.md` - This file contains a description of the program, examples of how to run it, and a list of uploaded files.

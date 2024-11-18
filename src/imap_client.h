@@ -24,6 +24,12 @@ struct Connection {
 };
 
 /**
+ * Generates a unique tag for IMAP commands.
+ * @return std::string - The generated tag.
+ */
+std::string generate_tag();
+
+/**
  * Generalized read function that handles both SSL and non-SSL reads.
  * @param conn - Connection object.
  * @param buf - Buffer to read data into.
@@ -57,9 +63,10 @@ Connection connect_to_server(const std::string& server, int port, SSL_CTX* ctx, 
  * @param conn - Connection object containing server connection details.
  * @param command - Command to be sent to the server.
  * @param response - String to store the server's response.
+ * @param expected_tag - The unique tag expected in the server's response.
  * @return bool - True if command sent successfully and response received.
  */
-bool send_command(Connection& conn, const std::string& command, std::string& response);
+bool send_command(Connection& conn, const std::string& command, std::string& response, const std::string& expected_tag);
 
 /**
  * Reads a line from the server.
@@ -122,6 +129,7 @@ bool select_mailbox(Connection& conn, const std::string& mailbox, std::vector<in
 /**
  * Reads the local index of UIDs from a file.
  * @param out_dir - The directory containing the index file.
+ * @return std::set<int> - Set of local UIDs.
  */
 std::set<int> read_local_index(const std::string& out_dir);
 
@@ -130,7 +138,7 @@ std::set<int> read_local_index(const std::string& out_dir);
  * @param out_dir - The directory containing the index file.
  * @param local_uids - The set of local UIDs to be written to the index file.
  */
-void update_local_index(const std::string& out_dir, const std::string& mailbox, const std::set<int>& local_uids);
+void update_local_index(const std::string& out_dir, const std::set<int>& local_uids);
 
 /**
  * Searches for unseen messages in the selected mailbox.
@@ -155,7 +163,7 @@ bool save_message(const std::string& message, const std::string& out_dir, int me
  * Fetches messages from the server based on the provided message UIDs.
  * Handles both fetching headers only or full message content.
  * @param conn - Connection object containing server connection details.
- * @param message_numbers - Vector of message unique IDs to fetch.
+ * @param message_uids - Vector of message unique IDs to fetch.
  * @param only_headers - Boolean flag indicating whether to fetch only headers.
  * @param out_dir - Output directory to save the fetched messages.
  * @param mailbox - Mailbox name from which messages are being fetched.
