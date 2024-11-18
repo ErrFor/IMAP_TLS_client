@@ -3,7 +3,7 @@
 # @author Slabik Yaroslav xslabi01
 
 CXX = g++
-CXXFLAGS = -std=c++11 -Wall -Wextra -pedantic
+CXXFLAGS = -std=c++17 -Wall -Wextra -pedantic
 LDFLAGS = -lssl -lcrypto
 
 SRC_DIR = src

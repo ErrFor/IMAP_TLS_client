@@ -12,6 +12,7 @@
 #include <openssl/ssl.h>
 #include <vector>
 #include <set>
+#include <map>
 
 /**
  * Struct representing a connection to the server.
@@ -131,14 +132,14 @@ bool select_mailbox(Connection& conn, const std::string& mailbox, std::vector<in
  * @param out_dir - The directory containing the index file.
  * @return std::set<int> - Set of local UIDs.
  */
-std::set<int> read_local_index(const std::string& out_dir);
+std::map<int, std::string> read_local_index(const std::string& out_dir);
 
 /**
  * Updates the local index file with the current set of UIDs.
  * @param out_dir - The directory containing the index file.
- * @param local_uids - The set of local UIDs to be written to the index file.
+ * @param local_index - The set of local UIDs to be written to the index file.
  */
-void update_local_index(const std::string& out_dir, const std::set<int>& local_uids);
+void update_local_index(const std::string& out_dir, std::map<int, std::string> local_index);
 
 /**
  * Searches for unseen messages in the selected mailbox.

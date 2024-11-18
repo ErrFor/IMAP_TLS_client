@@ -323,25 +323,25 @@ bool select_mailbox(Connection& conn, const std::string& mailbox, std::vector<in
     return true;
 }
 
-std::set<int> read_local_index(const std::string& out_dir) {
-    std::set<int> local_uids;
-    std::string index_file = out_dir + "/index.txt";
-    std::ifstream index_in(index_file);
-    if (!index_in.is_open()) {
-        // Index file does not exist yet
-        return local_uids;
+std::map<int, std::string> read_local_index(const std::string& out_dir) {
+    std::map<int, std::string> local_index;
+    std::string index_index = out_dir + "/index.txt";
+    std::ifstream index_in(index_index);
+    if (index_in.is_open()) {
+        std::string line;
+        while (std::getline(index_in, line)) {
+            std::istringstream iss(line);
+            int uid;
+            std::string status;
+            iss >> uid >> status;
+            local_index[uid] = status;
+        }
+        index_in.close();
     }
-
-    int uid;
-    while (index_in >> uid) {
-        local_uids.insert(uid);
-    }
-
-    index_in.close();
-    return local_uids;
+    return local_index;
 }
 
-void update_local_index(const std::string& out_dir, const std::set<int>& local_uids) {
+void update_local_index(const std::string& out_dir, std::map<int, std::string> local_index) {
     std::string index_file = out_dir + "/index.txt";
 
     // Write the updated index
@@ -350,13 +350,12 @@ void update_local_index(const std::string& out_dir, const std::set<int>& local_u
         std::cerr << "Failed to open index file: " << index_file << std::endl;
         return;
     }
-
-    for (int uid : local_uids) {
-        index_out << uid << std::endl;
+    for (const auto& [uid, status] : local_index) {
+        index_out << uid << " " << status << std::endl;
     }
-
     index_out.close();
 }
+
 
 bool search_unseen_messages(Connection& conn, std::vector<int>& messages_numbers) {
     std::string tag = generate_tag();
@@ -506,28 +505,17 @@ bool fetch_messages(Connection& conn, const std::vector<int>& message_uids, bool
                     const std::string& out_dir, const std::string& mailbox, bool only_new) {
     int messages_fetched = 0;
 
-    if (message_uids.empty()) {return true;}    // No messages to fetch
-
-    // Read local UIDs
-    std::set<int> local_uids = read_local_index(out_dir);
-
-    // Determine new messages to download
-    std::vector<int> uids_to_download;
-    if (!only_new) {
-        // When only headers are requested, fetch headers for all messages
-        uids_to_download = message_uids;
-    } else {
-        // Determine new messages to download
-        for (int uid : message_uids) {
-            if (local_uids.find(uid) == local_uids.end()) {
-                uids_to_download.push_back(uid);
-            }
-        }
+    if (message_uids.empty()) {
+        std::cout << "Žádné nové zprávy ve schránce " << mailbox << "." << std::endl;
+        return true;
     }
+
+    // Read local index
+    std::map<int, std::string> local_index = read_local_index(out_dir);
 
     // Determine messages to delete locally
     std::vector<int> uids_to_delete;
-    for (int uid : local_uids) {
+    for (const auto& [uid, status] : local_index) {
         if (std::find(message_uids.begin(), message_uids.end(), uid) == message_uids.end()) {
             uids_to_delete.push_back(uid);
         }
@@ -536,11 +524,35 @@ bool fetch_messages(Connection& conn, const std::vector<int>& message_uids, bool
     // Delete local messages that have been removed from the server
     for (int uid : uids_to_delete) {
         std::string file_path = out_dir + "/message_" + std::to_string(uid) + ".txt";
-        remove(file_path.c_str());
-        local_uids.erase(uid);
+        std::remove(file_path.c_str());
+        local_index.erase(uid);
     }
 
-    for (int uid : uids_to_download) {
+    // Determine which messages to fetch
+    std::vector<int> uids_to_fetch;
+    for (int uid : message_uids) {
+        if (only_headers) {
+            if (local_index.find(uid) == local_index.end() || local_index[uid] != "header") {
+                uids_to_fetch.push_back(uid);
+            }
+        } else {
+            if (local_index.find(uid) == local_index.end() || local_index[uid] != "full") {
+                uids_to_fetch.push_back(uid);
+            }
+        }
+    }
+
+    if (uids_to_fetch.empty() && !only_new) {
+        std::cout << "V schránce " << mailbox << " nedošlo k žádné změně." << std::endl;
+        return true; // Nothing to fetch
+    }
+    else if (uids_to_fetch.empty() && only_new) {
+        std::cout << "Žádné nové zprávy ve schránce " << mailbox << "." << std::endl;
+        return true; // Nothing to fetch
+    }
+
+    // Fetch messages
+    for (int uid : uids_to_fetch) {
         std::string tag_fetch = generate_tag();
         std::string fetch_command;
         if (only_headers) {
@@ -549,71 +561,48 @@ bool fetch_messages(Connection& conn, const std::vector<int>& message_uids, bool
             fetch_command = tag_fetch + " UID FETCH " + std::to_string(uid) + " (RFC822)\r\n";
         }
 
-        // Send the FETCH command
-        int bytes_sent = ssl_write(conn, fetch_command.c_str(), fetch_command.length());
-
-        if (bytes_sent <= 0) {
-            std::cerr << "Failed to send fetch command" << std::endl;
+        if (ssl_write(conn, fetch_command.c_str(), fetch_command.length()) <= 0) {
+            std::cerr << "Failed to send FETCH command for UID: " << uid << std::endl;
             return false;
         }
 
-        // Read response
         std::string line;
+        std::string literal_data;
         while (true) {
             if (!read_line(conn, line)) {
-                std::cerr << "Error reading from socket" << std::endl;
+                std::cerr << "Error reading response from server." << std::endl;
                 return false;
             }
 
-            // Check for completion of the command
-            if (line.find(tag_fetch + " OK") != std::string::npos && line[0] == 'a') {
-                // End of response
-                break;
-            } else if (line[0] == '*') {
-                // Possible data
-                if (line.find("FETCH") != std::string::npos) {
-                    // Check if line contains a literal indicator {number}
-                    size_t pos = line.find("{");
-                    if (pos != std::string::npos) {
-                        size_t end_pos = line.find("}", pos);
-                        if (end_pos != std::string::npos) {
-                            std::string num_str = line.substr(pos + 1, end_pos - pos - 1);
-                            int literal_size = std::stoi(num_str);
+            if (line.find(tag_fetch + " OK") != std::string::npos) {
+                break; // End of response
+            } else if (line.find("FETCH") != std::string::npos && line.find("{") != std::string::npos) {
+                // Literal data
+                size_t pos = line.find("{");
+                size_t end_pos = line.find("}", pos);
+                int literal_size = std::stoi(line.substr(pos + 1, end_pos - pos - 1));
+                if (!read_literal(conn, literal_size, literal_data)) {
+                    std::cerr << "Error reading literal data for UID: " << uid << std::endl;
+                    return false;
+                }
+                if (!save_message(literal_data, out_dir, uid)) {
+                    std::cerr << "Failed to save message UID: " << uid << std::endl;
+                    return false;
+                }
 
-                            // Read the literal data
-                            std::string literal_data;
-                            if (!read_literal(conn, literal_size, literal_data)) {
-                                std::cerr << "Error reading literal data" << std::endl;
-                                return false;
-                            }
-
-                            // Read the closing parenthesis
-                            if (!read_line(conn, line)) {
-                                std::cerr << "Error reading from socket" << std::endl;
-                                return false;
-                            }
-
-                            // Save the message
-                            if (!save_message(literal_data, out_dir, uid)) {
-                                std::cerr << "Failed to save message number: " << uid << std::endl;
-                                return false;
-                            }
-
-                            local_uids.insert(uid);
-                            messages_fetched++;
-                        }
-                    }
+                // Update local state
+                if (only_headers) {
+                    local_index[uid] = "header";
+                } else {
+                    local_index[uid] = "full"; // If full message is downloaded, remove it from header-only
                 }
             }
         }
+        messages_fetched++;
     }
 
-    if (messages_fetched == 0) {
-        std::cout << "Žádné nové zprávy ve schránce " << mailbox << "." << std::endl;
-        return true;
-    }
-
-    update_local_index(out_dir, local_uids);
+    // Update the local index
+    update_local_index(out_dir, local_index);
 
     // Output information about the number of downloaded messages
     if (only_headers && only_new) {
